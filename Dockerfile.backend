@@ -1,0 +1,41 @@
+# =====================================================================
+# ZAMP Accounts Payable AI Employee — Backend & FastMCP Dockerfile
+# =====================================================================
+FROM python:3.11-slim
+
+# Prevent Python from writing .pyc files and enable unbuffered logging
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    gcc \
+    libpq-dev \
+    netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY backend/requirements.txt /app/backend/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r /app/backend/requirements.txt
+
+# Copy source code
+COPY backend/ /app/backend/
+COPY mcp/ /app/mcp/
+
+# Set Python search path so app and mcp are importable
+ENV PYTHONPATH="/app/backend:/app/mcp"
+
+# Expose FastAPI (8080) and FastMCP SSE (8000)
+EXPOSE 8080
+EXPOSE 8000
+
+# Default working directory for running uvicorn app.main:app
+WORKDIR /app/backend
+
+# Default entrypoint runs FastAPI server
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

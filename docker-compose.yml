@@ -1,0 +1,135 @@
+version: "3.9"
+
+services:
+  # =====================================================================
+  # 1. PostgreSQL Enterprise Data Layer (Port 5432)
+  # =====================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: zamp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-zamp_ap}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/app/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d zamp_ap"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - zamp-network
+
+  # =====================================================================
+  # 2. FastMCP Tool Server (Port 8000)
+  # Exposes 34 ERP & Financial Control Tools over SSE transport
+  # =====================================================================
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: zamp-mcp-server
+    restart: unless-stopped
+    command: python /app/mcp/run_server.py --host 0.0.0.0 --port 8000 --transport sse
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-zamp_ap}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_KEY: ${OPENAI_API_KEY}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s --max-time 3 http://localhost:8000/sse -o /dev/null && exit 0 || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - zamp-network
+
+  # =====================================================================
+  # 3. FastAPI Backend Orchestrator (Port 8080)
+  # Hosts LangGraph PostgresSaver checkpointer, HITL gates, and SSE bus
+  # =====================================================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: zamp-backend
+    restart: unless-stopped
+    command: >
+      bash -c "
+        echo 'Waiting for PostgreSQL...' &&
+        until nc -z postgres 5432; do echo 'postgres not ready, sleeping 2s...'; sleep 2; done &&
+        echo 'PostgreSQL is ready! Running init...' &&
+        python app/db/init_db.py &&
+        echo 'Starting FastAPI...' &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8080
+      "
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-zamp_ap}
+      MCP_SERVER_URL: http://mcp-server:8000/sse
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_KEY: ${OPENAI_API_KEY}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-https://cloud.langfuse.com}
+      LANGFUSE_HOST: ${LANGFUSE_BASE_URL:-https://cloud.langfuse.com}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mcp-server:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - zamp-network
+
+  # =====================================================================
+  # 4. Streamlit Frontend (Port 8501)
+  # Interactive UI with theme toggle, vertical stepper, and batch dropzone
+  # =====================================================================
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: zamp-frontend
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:8080
+    ports:
+      - "80:8501"
+      - "8501:8501"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8501/_stcore/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - zamp-network
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  zamp-network:
+    driver: bridge

@@ -1,0 +1,342 @@
+/* =====================================================================
+   ZAMP Accounts Payable Enterprise Design System
+   Modern, Clean, Finance-Operations Aesthetics
+   ===================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    letter-spacing: -0.011em;
+}
+
+/* Constrained max-width layout for high-end readability (1240px) */
+.block-container {
+    max-width: 1240px !important;
+    padding-top: 1rem !important;
+    padding-bottom: 2.5rem !important;
+    padding-left: 1.5rem !important;
+    padding-right: 1.5rem !important;
+}
+
+/* Hide default clutter */
+.stDeployButton {
+    display: none !important;
+}
+
+#MainMenu {
+    visibility: hidden !important;
+}
+
+footer {
+    visibility: hidden !important;
+}
+
+/* Header Component */
+.app-header-container {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0 1rem 0;
+    margin-bottom: 1.25rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.brand-badge {
+    background-color: var(--primary);
+    color: #ffffff;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.85rem;
+    letter-spacing: -0.02em;
+}
+
+.brand-title {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+}
+
+.brand-subtitle {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    line-height: 1;
+}
+
+/* Page Titles */
+.page-title {
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: 0 0 0.25rem 0;
+    letter-spacing: -0.02em;
+}
+
+.page-description {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    margin: 0 0 1.25rem 0;
+}
+
+/* Card Containers */
+.ap-card {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.25rem;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.ap-card-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 0.5rem;
+}
+
+/* Native Container Styling */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    background-color: var(--bg-card) !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 8px !important;
+    padding: 1.25rem !important;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03) !important;
+    margin-bottom: 1rem !important;
+}
+
+/* Restrained Status Badges */
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+.status-pill-green {
+    background-color: var(--badge-green-bg);
+    color: var(--badge-green-text);
+    border: 1px solid var(--badge-green-border);
+}
+
+.status-pill-amber {
+    background-color: var(--badge-amber-bg);
+    color: var(--badge-amber-text);
+    border: 1px solid var(--badge-amber-border);
+}
+
+.status-pill-red {
+    background-color: var(--badge-red-bg);
+    color: var(--badge-red-text);
+    border: 1px solid var(--badge-red-border);
+}
+
+.status-pill-blue {
+    background-color: var(--badge-blue-bg);
+    color: var(--badge-blue-text);
+    border: 1px solid var(--badge-blue-border);
+}
+
+.status-pill-gray {
+    background-color: var(--badge-gray-bg);
+    color: var(--badge-gray-text);
+    border: 1px solid var(--border-color);
+}
+
+/* =====================================================================
+   Vertical Business Stepper Component (7 Canonical Steps)
+   ===================================================================== */
+.stepper-container {
+    display: flex;
+    flex-direction: column;
+    padding: 0.75rem 0.25rem;
+}
+
+.stepper-step {
+    display: flex;
+    align-items: flex-start;
+    position: relative;
+    padding-bottom: 1.25rem;
+}
+
+.stepper-step:last-child {
+    padding-bottom: 0.25rem;
+}
+
+.stepper-left {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 26px;
+    margin-right: 14px;
+    position: relative;
+    flex-shrink: 0;
+}
+
+.stepper-circle {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.72rem;
+    font-weight: 600;
+    z-index: 2;
+    transition: all 0.2s ease;
+}
+
+/* Completed: subtle green circle with checkmark */
+.stepper-circle-completed {
+    background-color: #f0fdf4;
+    border: 1.5px solid #16a34a;
+    color: #16a34a;
+}
+
+/* Current: solid blue indicator */
+.stepper-circle-current {
+    background-color: var(--primary);
+    border: 1.5px solid var(--primary);
+    color: #ffffff;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+/* Warning / Attention: amber */
+.stepper-circle-warning {
+    background-color: #fffbeb;
+    border: 1.5px solid #d97706;
+    color: #d97706;
+}
+
+/* Failed: red */
+.stepper-circle-failed {
+    background-color: #fef2f2;
+    border: 1.5px solid #dc2626;
+    color: #dc2626;
+}
+
+/* Future: muted gray */
+.stepper-circle-future {
+    background-color: var(--bg-card-subtle);
+    border: 1.5px solid var(--border-color);
+    color: var(--text-muted);
+}
+
+/* Connecting vertical line */
+.stepper-line {
+    position: absolute;
+    top: 24px;
+    bottom: -4px;
+    width: 2px;
+    background-color: var(--border-color);
+    z-index: 1;
+}
+
+.stepper-line-completed {
+    background-color: #16a34a;
+}
+
+.stepper-content {
+    flex: 1;
+    min-width: 0;
+    padding-top: 1px;
+}
+
+.stepper-title {
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.stepper-title-future {
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.stepper-message {
+    font-size: 0.8rem;
+    margin-top: 3px;
+    color: var(--text-secondary);
+    line-height: 1.35;
+}
+
+.stepper-message-current {
+    color: var(--primary);
+    font-weight: 500;
+}
+
+.stepper-message-warning {
+    color: #b45309;
+}
+
+.stepper-message-failed {
+    color: #b91c1c;
+}
+
+/* Action Boxes */
+.action-box {
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.25rem;
+}
+
+.action-box-amber {
+    background-color: var(--badge-amber-bg);
+    border: 1px solid var(--badge-amber-border);
+}
+
+.action-box-blue {
+    background-color: var(--badge-blue-bg);
+    border: 1px solid var(--badge-blue-border);
+}
+
+.action-box-green {
+    background-color: var(--badge-green-bg);
+    border: 1px solid var(--badge-green-border);
+}
+
+.action-box-red {
+    background-color: var(--badge-red-bg);
+    border: 1px solid var(--badge-red-border);
+}
+
+/* Metrics */
+div[data-testid="stMetricValue"] {
+    font-size: 1.35rem !important;
+    font-weight: 700 !important;
+    color: var(--text-primary) !important;
+}
+
+div[data-testid="stMetricLabel"] {
+    font-size: 0.78rem !important;
+    font-weight: 500 !important;
+    color: var(--text-secondary) !important;
+}
+
+/* Primary Button Styling */
+button[kind="primary"] {
+    background-color: var(--primary) !important;
+    border-color: var(--primary) !important;
+    color: #ffffff !important;
+    font-weight: 600 !important;
+    border-radius: 6px !important;
+}
+
+/* Popover Styling */
+div[data-testid="stPopover"] {
+    display: flex;
+    justify-content: flex-end;
+}
