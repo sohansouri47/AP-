@@ -6,11 +6,11 @@
 
 INSTANCE_ID="i-02d0d9442cf978057"
 REGION="us-east-1"
-AWS="/opt/miniconda3/bin/aws"
+export AWS_PAGER=""
 
 echo ""
 echo "⏸  Stopping EC2 instance ${INSTANCE_ID}..."
-$AWS ec2 stop-instances --instance-ids "$INSTANCE_ID" --region "$REGION"
+aws ec2 stop-instances --instance-ids "$INSTANCE_ID" --region "$REGION"
 
 echo ""
 echo "✅ Instance is stopping. You will not be charged for compute."

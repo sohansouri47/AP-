@@ -8,7 +8,7 @@ INSTANCE_ID="i-02d0d9442cf978057"
 REGION="us-east-1"
 EC2_USER="ubuntu"
 EC2_KEY="$HOME/Downloads/ap.pem"
-AWS="/opt/miniconda3/bin/aws"
+export AWS_PAGER=""
 
 echo ""
 echo "▶  Starting EC2 instance ${INSTANCE_ID}..."
