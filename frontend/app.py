@@ -35,6 +35,7 @@ from components.decision_view import (
 from components.history_table import render_run_history
 from components.master_data_view import render_master_data_page
 from components.batch_view import render_batch_summary_card
+from components.governance_view import render_governance_page
 
 # Page Configuration (Clean, centered max-width layout, collapsed sidebar)
 st.set_page_config(
@@ -99,7 +100,7 @@ with header_col1:
     )
 
 with header_col2:
-    nav_options = ["Process Invoice", "Decision", "History", "Master Data"]
+    nav_options = ["Process Invoice", "Decision", "History", "Master Data", "Governance"]
     # Map legacy keys if needed
     legacy_map = {
         "Process invoice": "Process Invoice",
@@ -184,11 +185,11 @@ if current_tab == "Process Invoice":
             st.markdown("<div style='height: 4px;'></div>", unsafe_allow_html=True)
 
             if "input_method_select" not in st.session_state:
-                st.session_state["input_method_select"] = "Demo scenarios"
+                st.session_state["input_method_select"] = "Upload PDF"
 
             input_method = st.segmented_control(
                 "Input method",
-                ["Demo scenarios", "Upload PDF"],
+                ["Upload PDF", "Demo scenarios"],
                 selection_mode="single",
                 required=True,
                 key="input_method_select",
@@ -203,28 +204,31 @@ if current_tab == "Process Invoice":
                 scenario_choice = st.selectbox(
                     "Select invoice scenario",
                     [
-                        "Ambiguous PO invoice (Globex Corp — Triggers AP review)",
-                        "Sample invoice PDF (Real document with GPT-4o-mini vision)",
-                        "Tax mismatch invoice (Acme Supplies — Triggers auto-rejection)",
-                        "Happy path invoice (Acme Supplies — Clean match)",
-                        "All demo scenarios (Batch of 4 scenarios)",
+                        "Happy path — clean 3-way match (Acme Supplies)",
+                        "Ambiguous PO — AP operator review required (Globex Corp)",
+                        "Arithmetic failure — auto-blocked (Acme Supplies)",
+                        "Duplicate invoice — blocked on resubmission (Vandelay)",
+                        "Real PDF — GPT-4o-mini vision extraction (Apex Industrial)",
+                        "Batch: all 5 edge case scenarios",
                     ],
                     key="scenario_choice_select",
                 )
                 if "Ambiguous PO" in scenario_choice:
                     selected_fixture = "inv-ambiguous-po"
-                elif "Sample invoice PDF" in scenario_choice:
-                    selected_fixture = "REAL_PDF"
-                elif "Tax mismatch" in scenario_choice:
+                elif "Arithmetic failure" in scenario_choice:
                     selected_fixture = "inv-tax-mismatch"
-                elif "All demo scenarios" in scenario_choice:
+                elif "Duplicate invoice" in scenario_choice:
+                    selected_fixture = "inv-duplicate-001"
+                elif "Real PDF" in scenario_choice:
+                    selected_fixture = "REAL_PDF"
+                elif "Batch" in scenario_choice:
                     selected_fixture = "BATCH_ALL"
                 else:
                     selected_fixture = "inv-happy-001"
             else:
                 uploaded_files = st.file_uploader(
-                    "Drag and drop PDF invoices (supports multiple files)",
-                    type=["pdf"],
+                    "Drag and drop invoices — PDF, image, or Excel (JPG, PNG, XLSX, CSV…)",
+                    type=["pdf", "jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "xlsx", "xls", "csv"],
                     accept_multiple_files=True,
                     key="custom_pdf_uploader",
                     label_visibility="collapsed",
@@ -245,7 +249,7 @@ if current_tab == "Process Invoice":
                     batch_count = len(uploaded_files)
             elif input_method == "Demo scenarios" and selected_fixture == "BATCH_ALL":
                 is_batch = True
-                batch_count = 4
+                batch_count = 5
 
             btn_label = f"Process {batch_count} invoices in batch" if is_batch else "Process invoice"
 
@@ -307,10 +311,11 @@ if current_tab == "Process Invoice":
                     })
             else:
                 items_to_process = [
-                    {"type": "fixture", "fixture_id": "inv-happy-001", "filename": "inv-happy-001 (Acme Supplies)"},
-                    {"type": "fixture", "fixture_id": "inv-ambiguous-po", "filename": "inv-ambiguous-po (Globex Corp)"},
-                    {"type": "fixture", "fixture_id": "inv-tax-mismatch", "filename": "inv-tax-mismatch (Acme Supplies)"},
-                    {"type": "pdf_path", "path": sample_pdf_path, "filename": "sample_invoice.pdf"},
+                    {"type": "fixture", "fixture_id": "inv-happy-001", "filename": "Happy path (Acme Supplies)"},
+                    {"type": "fixture", "fixture_id": "inv-ambiguous-po", "filename": "Ambiguous PO (Globex Corp)"},
+                    {"type": "fixture", "fixture_id": "inv-tax-mismatch", "filename": "Arithmetic failure (Acme Supplies)"},
+                    {"type": "fixture", "fixture_id": "inv-duplicate-001", "filename": "Duplicate invoice (Vandelay)"},
+                    {"type": "pdf_path", "path": sample_pdf_path, "filename": "Real PDF (Apex Industrial)"},
                 ]
 
             progress_bar = st.progress(0.0, text=f"Processing 1 of {len(items_to_process)} invoices...")
@@ -530,3 +535,6 @@ elif current_tab == "History":
 # =====================================================================
 elif current_tab == "Master Data":
     render_master_data_page()
+
+elif current_tab == "Governance":
+    render_governance_page(client)

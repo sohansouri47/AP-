@@ -63,7 +63,7 @@ def initialize_database(drop_existing: bool = False) -> None:
                 INSERT INTO supplier_bank_accounts (bank_account_ref_id, supplier_id, bank_name, routing_number, account_number_encrypted, account_last4, currency, is_primary)
                 VALUES
                     ('BANK-REF-SUPP-001-01', 'SUPP-001', 'JPMorgan Chase Bank', '021000021', 'ENC_JPM_7894561234321', '4321', 'USD', TRUE),
-                    ('BANK-REF-SUPP-002-01', 'SUPP-002', 'Wells Fargo Bank NA', '121000358', 'ENC_WF_11223344558765', '8765', 'USD', TRUE),
+                    ('BANK-REF-SUPP-002-01', 'SUPP-002', 'Wells Fargo Bank NA', '121000358', 'ENC_WF_11223344558899', '8899', 'USD', TRUE),
                     ('BANK-REF-SUPP-003-01', 'SUPP-003', 'Citibank NA', '026009593', 'ENC_CITI_99887766551111', '1111', 'USD', TRUE)
                 ON CONFLICT (bank_account_ref_id) DO NOTHING;
             """)

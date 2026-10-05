@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import pymupdf
+from PIL import Image as PILImage
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
@@ -137,6 +138,17 @@ def detect_mime_type(source: str | bytes | Path) -> str:
             return "image/jpeg"
         if source.startswith(b"RIFF") and b"WEBP" in source[:16]:
             return "image/webp"
+        if source.startswith(b"GIF8"):
+            return "image/gif"
+        if source.startswith(b"BM"):
+            return "image/bmp"
+        if source.startswith(b"II\x2a\x00") or source.startswith(b"MM\x00\x2a"):
+            return "image/tiff"
+        # xlsx/xls: PK zip header or OLE compound document
+        if source.startswith(b"PK\x03\x04"):
+            return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        if source.startswith(b"\xd0\xcf\x11\xe0"):
+            return "application/vnd.ms-excel"
 
     return "application/octet-stream"
 
@@ -223,20 +235,70 @@ def prepare_document_multimodal_payload(
         doc.close()
         digital_text = "\n\n".join(text_pages)
 
-    # 3. Process Raster Images (PNG, JPEG, WEBP)
-    elif "image/" in mime_type or mime_type in ("image/png", "image/jpeg", "image/webp"):
+    # 3. Process Raster Images (PNG, JPEG, WEBP, GIF)
+    elif mime_type in ("image/png", "image/jpeg", "image/webp", "image/gif"):
         metadata["format"] = "IMAGE"
         metadata["total_pages"] = 1
         metadata["pages_rendered"] = 1
         b64_str = base64.b64encode(raw_bytes).decode("utf-8")
-        actual_mime = mime_type if "image/" in mime_type else "image/png"
         multimodal_parts.append({
             "type": "image_url",
             "image_url": {
-                "url": f"data:{actual_mime};base64,{b64_str}",
+                "url": f"data:{mime_type};base64,{b64_str}",
                 "detail": "high",
             },
         })
+
+    # 4. Convert unsupported image formats (BMP, TIFF, etc.) to PNG via Pillow
+    elif mime_type in ("image/bmp", "image/tiff") or mime_type.startswith("image/"):
+        metadata["format"] = "IMAGE"
+        metadata["total_pages"] = 1
+        metadata["pages_rendered"] = 1
+        img = PILImage.open(io.BytesIO(raw_bytes)).convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64_str = base64.b64encode(buf.getvalue()).decode("utf-8")
+        multimodal_parts.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/png;base64,{b64_str}",
+                "detail": "high",
+            },
+        })
+
+    # 5. Process Excel workbooks (.xlsx, .xls)
+    elif mime_type in (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+    ) or metadata.get("filename", "").lower().endswith((".xlsx", ".xls")):
+        import openpyxl
+        metadata["format"] = "EXCEL"
+        wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True)
+        sheet_texts: list[str] = []
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            rows = list(ws.iter_rows(values_only=True))
+            if not rows:
+                continue
+            lines = [f"Sheet: {sheet_name}"]
+            for row in rows:
+                cells = [str(c) if c is not None else "" for c in row]
+                if any(cells):
+                    lines.append("\t".join(cells))
+            sheet_texts.append("\n".join(lines))
+        digital_text = "\n\n".join(sheet_texts)
+        metadata["total_pages"] = len(wb.sheetnames)
+        metadata["pages_rendered"] = len(wb.sheetnames)
+
+    # 6. CSV / plain text
+    elif mime_type in ("text/csv", "text/plain") or metadata.get("filename", "").lower().endswith(".csv"):
+        metadata["format"] = "CSV"
+        metadata["total_pages"] = 1
+        metadata["pages_rendered"] = 1
+        try:
+            digital_text = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            digital_text = raw_bytes.decode("latin-1", errors="replace")
 
     else:
         # Fallback raw text or binary
@@ -289,6 +351,8 @@ def extract_invoice_from_document(
     t0 = time.time()
     source_name = str(document_source) if isinstance(document_source, (str, Path)) else "<in-memory-bytes>"
 
+    logger.info("extract_invoice_from_document: starting | run=%s source=%s", run_id, source_name)
+
     flow_logger.agent_start(
         agent_name="MultimodalExtractor",
         method_name="extract_invoice_from_document",
@@ -296,6 +360,8 @@ def extract_invoice_from_document(
     )
 
     full_parts, digital_text, doc_meta = prepare_document_multimodal_payload(document_source)
+    logger.info("extract_invoice_from_document: document prepared | format=%s pages=%s digital_text_chars=%s",
+                doc_meta.get("format"), doc_meta.get("pages_rendered", 1), len(digital_text or ""))
 
     if not is_openai_configured():
         logger.warning("OpenAI API key not configured; using digital text fallback parser.")
@@ -316,21 +382,24 @@ def extract_invoice_from_document(
             "duration_ms": duration_ms,
         }
 
-    # Initialize cheapest model: gpt-4o-mini
-    llm = get_chat_model(model="gpt-4o-mini", temperature=0.0)
+    # Use gpt-4o for better accuracy on complex invoice layouts
+    llm = get_chat_model(model="gpt-4o", temperature=0.0)
     structured_extractor = llm.with_structured_output(ExtractedInvoiceData)
 
     message = HumanMessage(content=full_parts)
+    logger.info("extract_invoice_from_document: calling gpt-4o vision | run=%s parts=%d", run_id, len(full_parts))
 
     try:
         extracted: ExtractedInvoiceData = structured_extractor.invoke([message])
+        logger.info("extract_invoice_from_document: gpt-4o SUCCESS | invoice=%s supplier=%s total=%s po=%s",
+                    extracted.invoice_number, extracted.supplier_name, extracted.total_amount, extracted.po_number)
         duration_ms = (time.time() - t0) * 1000
 
         # Log observation in Langfuse
         if tracer:
             tracer.log_generation(
                 name="multimodal_invoice_extraction",
-                model="gpt-4o-mini",
+                model="gpt-4o",
                 prompt=f"Extract invoice data from {source_name} (Format: {doc_meta.get('format')}, Pages: {doc_meta.get('pages_rendered', 1)})",
                 completion=extracted.model_dump(),
                 usage={"pages_processed": doc_meta.get("pages_rendered", 1)},
@@ -355,7 +424,7 @@ def extract_invoice_from_document(
             "status": "SUCCESS",
             "source": source_name,
             "extracted_data": extracted_dict,
-            "method": "multimodal_vision_gpt4o_mini",
+            "method": "multimodal_vision_gpt4o",
             "metadata": doc_meta,
             "duration_ms": duration_ms,
         }
@@ -363,7 +432,8 @@ def extract_invoice_from_document(
 
     except Exception as exc:
         duration_ms = (time.time() - t0) * 1000
-        logger.error("Multimodal extraction failed with exception: %s", exc)
+        logger.error("extract_invoice_from_document FAILED | run=%s source=%s error=%s: %s",
+                     run_id, source_name, type(exc).__name__, exc, exc_info=True)
         flow_logger.tool_call(
             caller="MultimodalExtractor",
             tool_name="extract_invoice_vision",

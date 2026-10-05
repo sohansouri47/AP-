@@ -51,6 +51,11 @@ def render_contextual_action_card(
     interrupt = status_data.get("interrupt") or {}
     gate_type = interrupt.get("type", "")
 
+    # Clear resume-pending flag once the run moves past NEEDS_ATTENTION
+    resume_key = f"{key_prefix}_resume_pending"
+    if st.session_state.get(resume_key) and lifecycle_status not in ("NEEDS_ATTENTION", "AP_REVIEW", "INITIALIZED"):
+        st.session_state.pop(resume_key, None)
+
     # Role Gate 1: AP Operator Review (Ambiguous PO match)
     if gate_type == "AP_REVIEW" or (lifecycle_status in ("AP_REVIEW", "NEEDS_ATTENTION") and interrupt):
         st.markdown(
@@ -93,25 +98,31 @@ def render_contextual_action_card(
                 key=f"{key_prefix}_ap_note",
             )
 
+        # Show processing state while background resume is running
+        resume_key = f"{key_prefix}_resume_pending"
+        if st.session_state.get(resume_key):
+            st.info(f"Processing your PO selection — re-running financial controls in background. Refresh status when complete.")
+
         b1, b2 = st.columns([1.5, 1])
         with b1:
-            if st.button(f"Confirm {selected_po}", type="primary", key=f"{key_prefix}_btn_assign"):
-                with st.spinner(f"Reconciling {selected_po}..."):
-                    try:
-                        action_name = f"SELECT_{selected_po.replace('-', '_')}"
-                        res = client.resume_run(
-                            thread_id=thread_id,
-                            action=action_name,
-                            role=role,
-                            user_id=operator_id,
-                            selected_po=selected_po,
-                            reason=comment,
-                            decision_revision=interrupt.get("decision_revision", 1),
-                        )
-                        st.toast(f"Assigned {selected_po}! Status: {res.get('lifecycle_status')}", icon="✅")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error resuming: {e}")
+            btn_disabled = bool(st.session_state.get(resume_key))
+            if st.button("Confirm", type="primary", key=f"{key_prefix}_btn_assign", disabled=btn_disabled):
+                try:
+                    action_name = f"SELECT_{selected_po.replace('-', '_')}"
+                    client.resume_run(
+                        thread_id=thread_id,
+                        action=action_name,
+                        role=role,
+                        user_id=operator_id,
+                        selected_po=selected_po,
+                        reason=comment,
+                        decision_revision=interrupt.get("decision_revision", 1),
+                    )
+                    st.session_state[resume_key] = True
+                    st.toast("Submitted — processing in background", icon="⏳")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error resuming: {e}")
         with b2:
             if st.button("Reject invoice", key=f"{key_prefix}_btn_reject"):
                 with st.spinner("Rejecting invoice..."):
@@ -375,11 +386,12 @@ def render_decision_details(client: BackendAPIClient, thread_id: str):
             s1.metric("Recommended action", dec.get("recommended_action", lifecycle_status.replace("_", " ").title()))
             s2.metric("Audit confidence", conf_str)
 
-            if dec.get("rationale"):
+            summary_text = dec.get("summary") or dec.get("rationale") or ""
+            if summary_text:
                 st.markdown(
                     f"""
                     <div style="font-size: 0.82rem; color: var(--text-secondary); background: var(--bg-card-subtle); padding: 10px 12px; border-radius: 6px; margin-top: 8px; line-height: 1.4;">
-                        <strong>Policy rationale:</strong> {dec.get('rationale')}
+                        <strong>Policy rationale:</strong> {summary_text}
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -444,17 +456,82 @@ def render_decision_details(client: BackendAPIClient, thread_id: str):
     with tab_ctrl:
         with st.container(border=True):
             st.markdown("###### Deterministic Control Evaluations")
+            _CHECK_LABELS = {
+                "CHK_FILE_DUP":     "File hash deduplication",
+                "CHK_SUPPLIER_RES": "Supplier master resolution",
+                "CHK_BIZ_DUP":      "Business invoice duplicate",
+                "CHK_REMIT_CHANGE": "Remittance account change",
+                "CHK_ARITHMETIC":   "Header arithmetic verification",
+                "CHK_DATES_CURR":   "Date validity & currency",
+                "CHK_PO_IDENT":     "Purchase order identification",
+                "CHK_PO_HEADER":    "PO header & vendor binding",
+                "CHK_PO_LINES":     "3-way line item match",
+                "CHK_PO_REMAIN":    "PO remaining balance",
+                "CHK_PO_TOL":       "Price & quantity tolerance",
+                "CHK_NO_PO_POL":    "Non-PO expense compliance",
+                "CHK_APP_ROUTE":    "Approval route selection",
+            }
+            _STATUS_STYLE = {
+                "PASSED":         ("status-pill-green",  "Passed"),
+                "FAILED":         ("status-pill-red",    "Failed"),
+                "BLOCKED":        ("status-pill-red",    "Blocked"),
+                "REQUIRES_INPUT": ("status-pill-amber",  "Input needed"),
+                "SKIPPED":        ("status-pill-gray",   "Skipped"),
+            }
+            _ROW_LEFT_BORDER = {
+                "PASSED":         "#16a34a",
+                "FAILED":         "#dc2626",
+                "BLOCKED":        "#dc2626",
+                "REQUIRES_INPUT": "#d97706",
+                "SKIPPED":        "#94a3b8",
+            }
             checks = ctrl_rep.get("check_results") or dec.get("checks_evaluated") or []
             if checks:
-                check_rows = []
+                rows_html = []
                 for c in checks:
-                    check_rows.append({
-                        "Check ID": c.get("check_id"),
-                        "Status": c.get("status"),
-                        "Latency (ms)": round(c.get("latency_ms", 25.0), 1),
-                        "Message": c.get("message", ""),
-                    })
-                st.dataframe(pd.DataFrame(check_rows), hide_index=True)
+                    cid = c.get("check_id", "")
+                    cst = (c.get("status") or "PASSED").upper()
+                    pill_cls, pill_label = _STATUS_STYLE.get(cst, ("status-pill-gray", cst.title()))
+                    border_color = _ROW_LEFT_BORDER.get(cst, "#94a3b8")
+                    label = _CHECK_LABELS.get(cid, cid)
+                    msg = c.get("message", "")
+                    latency = round(c.get("latency_ms", 25.0), 0)
+                    rows_html.append(
+                        f'<tr style="border-left: 3px solid {border_color};">'
+                        f'<td style="padding: 7px 10px; font-size: 0.78rem; font-family: monospace; color: var(--text-muted); white-space: nowrap;">{cid}</td>'
+                        f'<td style="padding: 7px 10px; font-size: 0.82rem; font-weight: 500; color: var(--text-primary);">{label}</td>'
+                        f'<td style="padding: 7px 10px;"><span class="status-pill {pill_cls}" style="font-size: 0.68rem;">{pill_label}</span></td>'
+                        f'<td style="padding: 7px 10px; font-size: 0.8rem; color: var(--text-secondary); max-width: 260px;">{msg}</td>'
+                        f'<td style="padding: 7px 10px; font-size: 0.78rem; color: var(--text-muted); text-align: right; white-space: nowrap;">{int(latency)} ms</td>'
+                        f'</tr>'
+                    )
+                table_html = (
+                    '<div style="overflow-x: auto;">'
+                    '<table style="width:100%; border-collapse: collapse;">'
+                    '<thead><tr style="background: var(--bg-card-subtle); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted);">'
+                    '<th style="padding: 7px 10px; text-align: left; font-weight: 600; border-bottom: 1px solid var(--border-color);">Check ID</th>'
+                    '<th style="padding: 7px 10px; text-align: left; font-weight: 600; border-bottom: 1px solid var(--border-color);">Description</th>'
+                    '<th style="padding: 7px 10px; text-align: left; font-weight: 600; border-bottom: 1px solid var(--border-color);">Result</th>'
+                    '<th style="padding: 7px 10px; text-align: left; font-weight: 600; border-bottom: 1px solid var(--border-color);">Finding</th>'
+                    '<th style="padding: 7px 10px; text-align: right; font-weight: 600; border-bottom: 1px solid var(--border-color);">Latency</th>'
+                    '</tr></thead>'
+                    '<tbody>' + ''.join(rows_html) + '</tbody>'
+                    '</table></div>'
+                )
+                st.markdown(table_html, unsafe_allow_html=True)
+                passed = sum(1 for c in checks if (c.get("status") or "").upper() == "PASSED")
+                failed = sum(1 for c in checks if (c.get("status") or "").upper() in ("FAILED", "BLOCKED"))
+                attention = sum(1 for c in checks if (c.get("status") or "").upper() == "REQUIRES_INPUT")
+                st.markdown(
+                    f"""
+                    <div style="display:flex; gap:12px; margin-top:10px; font-size:0.8rem; color:var(--text-muted);">
+                        <span style="color:#16a34a; font-weight:600;">✓ {passed} passed</span>
+                        {'<span style="color:#dc2626; font-weight:600;">✕ ' + str(failed) + ' failed</span>' if failed else ''}
+                        {'<span style="color:#d97706; font-weight:600;">! ' + str(attention) + ' need input</span>' if attention else ''}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
             else:
                 st.caption("All 13 deterministic controls evaluated in master ledger.")
 
@@ -502,7 +579,7 @@ def render_decision_details(client: BackendAPIClient, thread_id: str):
                         "Quantity": p.get("quantity"),
                         "Unit Price": f"${p.get('unit_price', 0):,.2f}",
                     })
-                st.dataframe(pd.DataFrame(po_disp), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(po_disp), hide_index=True, width="stretch")
             else:
                 st.info(f"No specific purchase orders pre-seeded for vendor {supp_id}.")
 

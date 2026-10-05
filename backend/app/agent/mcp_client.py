@@ -15,6 +15,8 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import logging
 import os
 import socket
 import sys
@@ -28,6 +30,8 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from app.agent.flow_logger import flow_logger
+
+logger = logging.getLogger("ap_agent.mcp_client")
 
 # Ensure /mcp is on sys.path for server fallback imports
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -177,13 +181,28 @@ class FastMCPClientManager:
             if "ValueError" in err_msg or "completeness validation failed" in clean_msg.lower():
                 raise ValueError(clean_msg)
             raise
-        except Exception as exc:
+        except concurrent.futures.TimeoutError:
             duration_ms = (time.time() - t0) * 1000
+            msg = f"Tool '{tool_name}' timed out after {timeout}s — consider increasing timeout or checking MCP server responsiveness"
+            logger.error("MCP call timeout: %s", msg)
             flow_logger.tool_call(
                 caller=caller,
                 tool_name=f"[FastMCP {transport_tag}] {tool_name}",
                 status="FAILED",
-                details=f"Unexpected error: {exc}",
+                details=f"TIMEOUT ({timeout}s): {msg}",
+                duration_ms=duration_ms,
+            )
+            raise TimeoutError(msg)
+        except Exception as exc:
+            duration_ms = (time.time() - t0) * 1000
+            exc_type = type(exc).__name__
+            logger.error("MCP call failed [%s] tool=%s caller=%s error=%s: %s",
+                         transport_tag, tool_name, caller, exc_type, exc, exc_info=True)
+            flow_logger.tool_call(
+                caller=caller,
+                tool_name=f"[FastMCP {transport_tag}] {tool_name}",
+                status="FAILED",
+                details=f"{exc_type}: {exc}",
                 duration_ms=duration_ms,
             )
             raise

@@ -255,7 +255,7 @@ def render_master_data_page():
             })
 
         df_supp = pd.DataFrame(table_rows)
-        st.dataframe(df_supp, hide_index=True, use_container_width=True)
+        st.dataframe(df_supp, hide_index=True, width="stretch")
 
         st.markdown(
             """
@@ -319,7 +319,7 @@ def render_master_data_page():
                         "unit_price": "Unit Price ($)",
                         "line_total": "Line Total ($)",
                     })
-                    st.dataframe(lines_df, hide_index=True, use_container_width=True)
+                    st.dataframe(lines_df, hide_index=True, width="stretch")
 
         st.markdown(
             """

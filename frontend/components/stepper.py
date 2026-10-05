@@ -39,6 +39,13 @@ EVENT_CONFIG = {
         "badge_text": "Extracting",
         "description": "Multimodal vision model parsing optical text and tabular line items.",
     },
+    "extraction_completed": {
+        "title": "Invoice data extracted",
+        "icon": "check_circle",
+        "badge_class": "status-pill-green",
+        "badge_text": "Extracted",
+        "description": "Structured invoice fields, line items, and totals extracted by vision model.",
+    },
     "supplier_resolved": {
         "title": "Supplier verified",
         "icon": "domain",
@@ -113,28 +120,61 @@ def compute_canonical_steps(
     """Derive state for each of the 7 business-readable steps from genuine backend events."""
     event_types = [e.get("event") for e in events]
     status_data = status_data or {}
-    lifecycle_status = (status_data.get("lifecycle_status") or "").upper()
     ctrl_rep = status_data.get("control_report") or {}
     checks = ctrl_rep.get("check_results") or status_data.get("check_results") or []
 
+    # Build a synthetic check map from live control_completed events so the stepper
+    # shows failures/warnings in real-time during SSE streaming (before status_data arrives).
+    event_checks: dict[str, dict] = {}
+    for ev in events:
+        if ev.get("event") == "control_completed":
+            d = ev.get("data") or {}
+            cid = d.get("check_id")
+            if cid:
+                event_checks[cid] = d
+        elif ev.get("event") == "exception_raised":
+            d = ev.get("data") or {}
+            cid = d.get("check_id")
+            if cid and cid in event_checks:
+                event_checks[cid]["status"] = d.get("status", "FAILED")
+
+    # Merge: status_data checks take precedence (more authoritative), fill gaps with event_checks
+    merged_checks = {c.get("check_id"): c for c in checks}
+    for cid, c in event_checks.items():
+        if cid not in merged_checks:
+            merged_checks[cid] = c
+    all_checks = list(merged_checks.values())
+
+    # Lifecycle status: prefer status_data, fall back to decision_ready event data
+    lifecycle_status = (status_data.get("lifecycle_status") or "").upper()
+    if not lifecycle_status:
+        dec_ev = next((e for e in events if e.get("event") == "decision_ready"), None)
+        if dec_ev:
+            lifecycle_status = ((dec_ev.get("data") or {}).get("lifecycle_status") or "").upper()
+
     has_uploaded = "uploaded" in event_types or bool(status_data)
     has_extraction_started = "extraction_started" in event_types
+    has_extraction_completed = "extraction_completed" in event_types
     has_supplier_resolved = "supplier_resolved" in event_types or bool(status_data.get("extracted_invoice"))
     has_decision = "decision_ready" in event_types or bool(status_data.get("decision"))
     has_posting_package = "posting_package_ready" in event_types or lifecycle_status == "POSTING_PACKAGE_READY"
     has_human_action = "human_action_received" in event_types
 
-    # Find specific control results
-    dup_check = next((c for c in checks if c.get("check_id") == "CHK_BIZ_DUP"), None)
+    # Find specific control results from merged view
+    dup_check = next((c for c in all_checks if c.get("check_id") == "CHK_BIZ_DUP"), None)
     dup_failed = dup_check and dup_check.get("status") in ("FAILED", "BLOCKED")
 
-    po_checks = [c for c in checks if "PO" in c.get("check_id", "") or "3WAY" in c.get("check_id", "")]
+    po_checks = [c for c in all_checks if "PO" in c.get("check_id", "") or "3WAY" in c.get("check_id", "")]
     po_needs_input = any(c.get("status") == "REQUIRES_INPUT" for c in po_checks) or (
         lifecycle_status in ("AP_REVIEW", "NEEDS_ATTENTION") and not has_human_action
     )
     po_failed = any(c.get("status") == "FAILED" for c in po_checks)
 
-    failed_ctrl = next((c for c in checks if c.get("status") == "FAILED" and c.get("check_id") != "CHK_BIZ_DUP"), None)
+    failed_ctrl = next(
+        (c for c in all_checks if c.get("status") == "FAILED" and c.get("check_id") != "CHK_BIZ_DUP"),
+        None,
+    )
+    checks = all_checks  # use merged set for the rest of the function
 
     steps = [
         {
@@ -196,7 +236,16 @@ def compute_canonical_steps(
         steps[1]["state"] = "completed"
         ext = status_data.get("extracted_invoice") or {}
         inv_num = ext.get("invoice_number")
+        if not inv_num:  # fall back to extraction_completed event during live streaming
+            ext_ev = next((e for e in events if e.get("event") == "extraction_completed"), {})
+            inv_num = (ext_ev.get("data") or {}).get("invoice_number")
         steps[1]["message"] = f"Invoice #{inv_num} line items and optical data parsed" if inv_num else "Line items parsed via multimodal vision model"
+    elif has_extraction_completed:
+        # Extraction finished — controls starting next
+        steps[1]["state"] = "completed"
+        ext_ev = next((e for e in events if e.get("event") == "extraction_completed"), {})
+        inv_num = (ext_ev.get("data") or {}).get("invoice_number")
+        steps[1]["message"] = f"Invoice #{inv_num} extracted" if inv_num else "Invoice data extracted successfully"
     elif has_extraction_started:
         steps[1]["state"] = "current"
         steps[1]["message"] = "Multimodal vision model parsing optical text and tabular line items..."
@@ -216,8 +265,14 @@ def compute_canonical_steps(
         steps[2]["state"] = "current"
         steps[2]["message"] = "Validating supplier record in master ledger..."
 
+    # When step 3 hard-fails (duplicate invoice), cascade: steps 4 & 5 are blocked upstream
+    upstream_hard_fail = steps[2]["state"] == "failed"
+
     # 4. Matching purchase order
-    if po_needs_input:
+    if upstream_hard_fail:
+        steps[3]["state"] = "failed"
+        steps[3]["message"] = "Not evaluated — invoice blocked at duplicate check"
+    elif po_needs_input:
         steps[3]["state"] = "warning"
         steps[3]["message"] = "Ambiguous purchase order: multiple candidate POs found"
     elif po_failed:
@@ -232,7 +287,10 @@ def compute_canonical_steps(
         steps[3]["message"] = "Reconciling line items against purchase orders..."
 
     # 5. Running financial controls
-    if failed_ctrl:
+    if upstream_hard_fail:
+        steps[4]["state"] = "failed"
+        steps[4]["message"] = "Not evaluated — invoice blocked at duplicate check"
+    elif failed_ctrl:
         steps[4]["state"] = "failed"
         steps[4]["message"] = f"{failed_ctrl.get('check_id')}: {failed_ctrl.get('message', 'Control check failed')}"
     elif has_decision or has_posting_package or (checks and len(checks) >= 8):
@@ -271,17 +329,63 @@ def compute_canonical_steps(
     return steps
 
 
+_AGENT_STEPS = {2, 3, 4, 5, 6}  # step numbers driven by deep-agent / AI
+
+_CIRCLE_ICONS = {
+    "completed": "✓",
+    "warning":   "!",
+    "failed":    "✕",
+}
+
+_BADGES = {
+    "completed": '<span class="status-pill status-pill-green" style="font-size:0.66rem;padding:1px 6px;">Done</span>',
+    "current":   '<span class="status-pill status-pill-blue"  style="font-size:0.66rem;padding:1px 6px;">Processing</span>',
+    "warning":   '<span class="status-pill status-pill-amber" style="font-size:0.66rem;padding:1px 6px;">Action needed</span>',
+    "failed":    '<span class="status-pill status-pill-red"   style="font-size:0.66rem;padding:1px 6px;">Failed</span>',
+}
+
+_THINKING_DOTS = (
+    '<span class="thinking-dots">'
+    '<span></span><span></span><span></span>'
+    '</span>'
+)
+
+
+def _step_timestamp(events: list[dict[str, Any]], step_num: int) -> str:
+    """Return HH:MM:SS for the event that maps to a given step, or ''."""
+    step_event_map = {
+        1: "uploaded",
+        2: "extraction_started",
+        3: "supplier_resolved",
+        4: "control_completed",
+        5: "control_completed",
+        6: "decision_ready",
+        7: "posting_package_ready",
+    }
+    target = step_event_map.get(step_num)
+    if not target:
+        return ""
+    for ev in reversed(events):
+        if ev.get("event") == target:
+            ts = ev.get("timestamp")
+            if ts:
+                return _format_time(ts)
+    return ""
+
+
 def render_business_stepper(
     events: list[dict[str, Any]],
     status_data: dict[str, Any] | None = None,
 ):
-    """Render a clean, numbered vertical stepper with only business-readable labels."""
+    """Render an animated, deep-agent-aware vertical stepper."""
     if not events and not status_data:
         st.markdown(
             """
-            <div style="border: 1px dashed var(--border-color); border-radius: 8px; padding: 2rem; text-align: center; color: var(--text-muted);">
-                <div style="font-size: 0.9rem; font-weight: 500;">No execution in progress</div>
-                <div style="font-size: 0.8rem; margin-top: 0.25rem;">Start an invoice processing run to view live business steps.</div>
+            <div style="border:1px dashed var(--border-color);border-radius:8px;
+                        padding:2rem;text-align:center;color:var(--text-muted);">
+                <div style="font-size:0.9rem;font-weight:500;">No execution in progress</div>
+                <div style="font-size:0.8rem;margin-top:0.25rem;">
+                    Select a scenario or upload an invoice to begin.</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -291,66 +395,90 @@ def render_business_stepper(
     steps = compute_canonical_steps(events, status_data)
     total = len(steps)
 
-    # Clean vertical stepper layout
-    stepper_html = ['<div class="stepper-container">']
+    completed_count = sum(1 for s in steps if s["state"] == "completed")
+    is_active = any(s["state"] == "current" for s in steps)
 
+    # ── Progress header ──────────────────────────────────────────────
+    pct = int(completed_count / total * 100)
+    fill_cls = "stepper-progress-fill-active" if is_active else "stepper-progress-fill"
+    fill_style = f"width:{pct}%;" if not is_active else f"width:{max(pct, 12)}%;"
+
+    agent_badge = (
+        '<span class="agent-label" style="vertical-align:middle;">Deep Agent</span> '
+        if is_active else ""
+    )
+    progress_html = (
+        f'<div class="stepper-progress-header">'
+        f'<span class="stepper-progress-label">{agent_badge}'
+        f'{completed_count} / {total} steps</span>'
+        f'<div class="stepper-progress-track">'
+        f'<div class="{fill_cls}" style="{fill_style}"></div>'
+        f'</div>'
+        f'</div>'
+    )
+
+    # ── Steps ────────────────────────────────────────────────────────
+    rows = []
     for idx, s in enumerate(steps):
-        state = s["state"]  # completed | current | warning | failed | future
+        state = s["state"]
         is_last = idx == total - 1
         num = s["num"]
         title = s["title"]
         msg = s.get("message", "")
 
-        # Circle indicator icon
-        if state == "completed":
-            circle_content = "✓"
+        circle_icon = _CIRCLE_ICONS.get(state, str(num))
+        badge_html = _BADGES.get(state, "")
+
+        # Agent micro-label on AI-driven steps
+        if num in _AGENT_STEPS and state in ("completed", "current"):
+            badge_html += ' <span class="agent-label">AI</span>'
+
+        # Title class
+        title_cls = "stepper-title"
+        if state == "future":
+            title_cls += " stepper-title-future"
         elif state == "current":
-            circle_content = str(num)
-        elif state == "warning":
-            circle_content = "!"
-        elif state == "failed":
-            circle_content = "✕"
-        else:
-            circle_content = str(num)
+            title_cls += " stepper-title-current"
 
-        line_cls = "stepper-line-completed" if state == "completed" else ""
-        line_html = f'<div class="stepper-line {line_cls}"></div>' if not is_last else ""
+        # Timestamp for completed steps
+        ts = _step_timestamp(events, num) if state == "completed" else ""
+        ts_html = f'<span class="stepper-timestamp">{ts}</span>' if ts else ""
 
-        # Title formatting
-        title_cls = "stepper-title-future" if state == "future" else ""
-        badge_html = ""
-        if state == "completed":
-            badge_html = '<span class="status-pill status-pill-green" style="font-size: 0.68rem; padding: 1px 6px; margin-left: 6px;">Done</span>'
-        elif state == "current":
-            badge_html = '<span class="status-pill status-pill-blue" style="font-size: 0.68rem; padding: 1px 6px; margin-left: 6px;">In progress</span>'
-        elif state == "warning":
-            badge_html = '<span class="status-pill status-pill-amber" style="font-size: 0.68rem; padding: 1px 6px; margin-left: 6px;">Action needed</span>'
-        elif state == "failed":
-            badge_html = '<span class="status-pill status-pill-red" style="font-size: 0.68rem; padding: 1px 6px; margin-left: 6px;">Failed</span>'
+        # Message with thinking dots for active step
+        msg_html = ""
+        if msg:
+            msg_cls = f"stepper-message stepper-message-{state}"
+            dots = _THINKING_DOTS if state == "current" else ""
+            msg_html = f'<div class="{msg_cls}">{msg}{dots}</div>'
 
-        # Message formatting
-        msg_cls = f"stepper-message-{state}"
-        msg_html = f'<div class="stepper-message {msg_cls}">{msg}</div>' if msg else ""
+        # Connecting line
+        line_cls = "stepper-line" + (" stepper-line-completed" if state == "completed" else "")
+        line_html = f'<div class="{line_cls}"></div>' if not is_last else ""
 
-        step_block = (
-            f'<div class="stepper-step">'
+        # Step row class (highlight active)
+        step_cls = "stepper-step" + (" stepper-step-current" if state == "current" else "")
+
+        rows.append(
+            f'<div class="{step_cls}">'
             f'<div class="stepper-left">'
-            f'<div class="stepper-circle stepper-circle-{state}">{circle_content}</div>'
+            f'<div class="stepper-circle stepper-circle-{state}">{circle_icon}</div>'
             f'{line_html}'
             f'</div>'
             f'<div class="stepper-content">'
-            f'<div class="stepper-title {title_cls}">'
+            f'<div class="{title_cls}">'
             f'<span>{num}. {title}</span>'
             f'{badge_html}'
+            f'{ts_html}'
             f'</div>'
             f'{msg_html}'
             f'</div>'
             f'</div>'
         )
-        stepper_html.append(step_block)
 
-    stepper_html.append("</div>")
-    st.markdown("".join(stepper_html), unsafe_allow_html=True)
+    st.markdown(
+        progress_html + '<div class="stepper-container">' + "".join(rows) + "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # Backwards compatibility aliases

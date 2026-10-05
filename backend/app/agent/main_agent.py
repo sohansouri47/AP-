@@ -9,32 +9,16 @@ Orchestrates:
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 from app.agent.schemas import (
     APEmployeeOutcome,
     ControlExecutionReport,
-    DecisionResult,
     InvestigationResult,
-)
-from app.agent.mcp_tools import (
-    MAIN_AGENT_ALLOWLIST,
-    extract_invoice,
-    get_run_context,
-    verify_tool_permission,
-)
-from app.agent.subagents import (
-    execute_controls,
-    get_control_executor_subagent_spec,
-    get_exception_investigator_subagent_spec,
-    investigate_exceptions,
 )
 from app.agent.observability import TraceObserver
 from app.agent.flow_logger import flow_logger
-from app.agent.llm import get_chat_model
 from app.agent.prompts import (
-    MAIN_AP_EMPLOYEE_SYSTEM_PROMPT,
     EXPLANATION_READY_FOR_APPROVAL,
     EXPLANATION_BLOCKED_TEMPLATE,
     EXPLANATION_NEEDS_ATTENTION_TEMPLATE,
@@ -134,82 +118,21 @@ def run_ap_employee_pipeline(
     tracer: TraceObserver | None = None,
     force_skip_checks: list[str] | None = None,
 ) -> tuple[dict[str, Any], APEmployeeOutcome]:
-    """Execute the end-to-end AP Employee flow with specialist subagent delegations."""
-    flow_logger.agent_start(
-        agent_name="MainAPEmployee",
-        method_name="run_ap_employee_pipeline",
-        details=f"InvoiceRef: '{invoice_reference}' | Policy: '{policy_version}'",
-    )
+    """Execute the end-to-end AP Employee flow via the Deep Agent with specialist subagents.
 
-    # 1. Extract invoice
-    t0 = time.time()
-    ext_res = extract_invoice(run_id, invoice_reference, tracer=tracer)
-    extracted_invoice = ext_res.get("extracted_data", {})
-    inv_num = extracted_invoice.get("invoice_number", "UNKNOWN")
-    tot_amt = extracted_invoice.get("total_amount", 0.0)
-    curr = extracted_invoice.get("currency", "USD")
+    Delegates to run_ap_employee_deep_agent which orchestrates:
+    1. extract_invoice (main agent tool)
+    2. control-executor subagent (15 control tools, isolated)
+    3. exception-investigator subagent (7 read-only tools, isolated, if needed)
+    4. verify_and_sanitize_outcome (deterministic Section 14 gate, always runs)
+    """
+    from app.agent.deep_agent import run_ap_employee_deep_agent
 
-
-    flow_logger.tool_call(
-        caller="MainAPEmployee",
-        tool_name="extract_invoice",
-        status="SUCCESS",
-        details=f"Extracted Invoice #{inv_num} | Vendor: '{extracted_invoice.get('vendor_name', 'Unknown')}' | Total: ${tot_amt:,.2f} {curr}",
-        duration_ms=(time.time() - t0) * 1000,
-    )
-
-    if tracer:
-        tracer.log_mcp_tool_call(
-            tool_name="extract_invoice",
-            caller="main_agent",
-            inputs={"run_id": run_id, "invoice_reference": invoice_reference},
-            output=ext_res,
-        )
-
-    # If resuming from human action (e.g. human selected a PO)
-    if human_action:
-        selected_po = human_action.get("selected_po")
-        if selected_po:
-            extracted_invoice["po_number"] = selected_po
-            flow_logger.agent_start(
-                agent_name="MainAPEmployee",
-                method_name="apply_human_resolution",
-                details=f"Applied Human Resolved PO: '{selected_po}'",
-            )
-
-    # 2. Delegate controls to Control Executor
-    control_report = execute_controls(
+    return run_ap_employee_deep_agent(
         run_id=run_id,
         invoice_reference=invoice_reference,
-        extracted_invoice=extracted_invoice,
         policy_version=policy_version,
+        human_action=human_action,
         tracer=tracer,
-        skip_checks=force_skip_checks,
+        force_skip_checks=force_skip_checks,
     )
-
-    # 3. Delegate unresolved cases to Exception Investigator
-    investigation_result: InvestigationResult | None = None
-    if control_report.unresolved_items and control_report.completeness_valid:
-        investigation_result = investigate_exceptions(
-            run_id=run_id,
-            control_report=control_report,
-            tracer=tracer,
-        )
-
-    # 4. Synthesize, validate, and verify outcome
-    outcome = verify_and_sanitize_outcome(
-        run_id=run_id,
-        control_report=control_report,
-        investigation_result=investigation_result,
-    )
-
-    flow_logger.outcome(
-        status=outcome.status,
-        owner=outcome.owner,
-        explanation=outcome.explanation,
-    )
-
-    if tracer:
-        tracer.log_final_decision(outcome.model_dump())
-
-    return extracted_invoice, outcome

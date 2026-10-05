@@ -355,7 +355,8 @@ def run_workflow_improvement_analyst(state: WorkflowImprovementState) -> dict[st
     tracer = get_improvement_tracer(proposal_id=proposal_id, session_id=session_id)
     force_reg = state.get("safe_error", {}).get("force_regression", False) if state.get("safe_error") else False
 
-    proposal = analyze_workflow_improvement(
+    from app.agent.deep_agent import run_workflow_improvement_deep_agent
+    proposal = run_workflow_improvement_deep_agent(
         feedback_ids=state["feedback_ids"],
         candidate_version="v1.1.0",
         force_regression=force_reg,

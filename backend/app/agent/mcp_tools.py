@@ -367,10 +367,12 @@ def extract_invoice(
 ) -> dict[str, Any]:
     """MCP Tool: Extract structured invoice data from an invoice document reference."""
     verify_tool_permission("main_agent", "extract_invoice")
+    # Vision extraction on PDFs/images can take 30-60s — use a long timeout
     return get_mcp_client().call_tool(
         "main_agent",
         "extract_invoice",
         {"run_id": run_id, "invoice_reference": str(invoice_reference)},
+        timeout=120.0,
     )
 
 
@@ -396,6 +398,7 @@ def get_required_checks(
 
 
 def check_file_duplicate(invoice_reference: str, file_hash: str = "") -> dict[str, Any]:
+    """Check if this invoice file is a duplicate by comparing its hash against the repository."""
     verify_tool_permission("control-executor", "check_file_duplicate")
     return get_mcp_client().call_tool(
         "control-executor",
@@ -405,6 +408,7 @@ def check_file_duplicate(invoice_reference: str, file_hash: str = "") -> dict[st
 
 
 def resolve_supplier(supplier_name: str, tax_id: str = "") -> dict[str, Any]:
+    """Resolve supplier name and tax ID against the master vendor directory."""
     verify_tool_permission("control-executor", "resolve_supplier")
     return get_mcp_client().call_tool(
         "control-executor",
@@ -419,6 +423,7 @@ def check_business_duplicate(
     invoice_date: str,
     total_amount: float,
 ) -> dict[str, Any]:
+    """Check for business-level invoice duplicates by supplier, number, date, and amount."""
     verify_tool_permission("control-executor", "check_business_duplicate")
     return get_mcp_client().call_tool(
         "control-executor",
@@ -433,6 +438,7 @@ def check_business_duplicate(
 
 
 def check_remit_change(supplier_id: str, bank_account_last4: str = "") -> dict[str, Any]:
+    """Detect unexpected remittance bank account changes for a supplier."""
     verify_tool_permission("control-executor", "check_remit_change")
     return get_mcp_client().call_tool(
         "control-executor",
@@ -447,6 +453,7 @@ def check_arithmetic(
     total_amount: float,
     line_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Verify invoice header totals and line-item arithmetic are internally consistent."""
     verify_tool_permission("control-executor", "check_arithmetic")
     from app.agent.policy import get_active_policy
     policy = get_active_policy()
@@ -484,6 +491,7 @@ def check_dates_currency(
     due_date: str = "",
     currency: str = "USD",
 ) -> dict[str, Any]:
+    """Validate invoice date format and verify currency is in the authorized list."""
     verify_tool_permission("control-executor", "check_dates_currency")
     from app.agent.policy import get_active_policy
     policy = get_active_policy()
@@ -510,6 +518,7 @@ def check_dates_currency(
 
 
 def identify_purchase_order(invoice_reference: str, po_number: str = "") -> dict[str, Any]:
+    """Identify and associate the purchase order for this invoice."""
     verify_tool_permission("control-executor", "identify_purchase_order")
     return get_mcp_client().call_tool(
         "control-executor",
@@ -519,6 +528,7 @@ def identify_purchase_order(invoice_reference: str, po_number: str = "") -> dict
 
 
 def validate_po_header(po_number: str, supplier_id: str) -> dict[str, Any]:
+    """Validate PO status, approval, and supplier binding at the header level."""
     verify_tool_permission("control-executor", "validate_po_header")
     return get_mcp_client().call_tool(
         "control-executor",
@@ -528,6 +538,7 @@ def validate_po_header(po_number: str, supplier_id: str) -> dict[str, Any]:
 
 
 def match_po_lines(po_number: str, invoice_lines: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Match invoice line items to PO lines by quantity and unit price."""
     verify_tool_permission("control-executor", "match_po_lines")
     return get_mcp_client().call_tool(
         "control-executor",
@@ -537,6 +548,7 @@ def match_po_lines(po_number: str, invoice_lines: list[dict[str, Any]] | None = 
 
 
 def calculate_po_remaining(po_number: str, invoice_amount: float) -> dict[str, Any]:
+    """Calculate remaining budget on the PO after applying this invoice amount."""
     verify_tool_permission("control-executor", "calculate_po_remaining")
     return get_mcp_client().call_tool(
         "control-executor",
@@ -549,6 +561,7 @@ def evaluate_po_tolerances(
     invoice_lines: list[dict[str, Any]] | None = None,
     po_lines: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Evaluate whether invoice line variances are within policy price and quantity tolerances."""
     verify_tool_permission("control-executor", "evaluate_po_tolerances")
     return get_mcp_client().call_tool(
         "control-executor",
@@ -558,6 +571,7 @@ def evaluate_po_tolerances(
 
 
 def evaluate_no_po_policy(invoice_amount: float, cost_center: str = "") -> dict[str, Any]:
+    """Evaluate whether a non-PO invoice meets the policy threshold for direct approval."""
     verify_tool_permission("control-executor", "evaluate_no_po_policy")
     return get_mcp_client().call_tool(
         "control-executor",
@@ -567,6 +581,7 @@ def evaluate_no_po_policy(invoice_amount: float, cost_center: str = "") -> dict[
 
 
 def select_approval_route(invoice_amount: float, supplier_tier: str = "standard") -> dict[str, Any]:
+    """Select the required approval role based on invoice amount and supplier tier."""
     verify_tool_permission("control-executor", "select_approval_route")
     from app.agent.policy import get_active_policy
     policy = get_active_policy()
@@ -594,6 +609,7 @@ def validate_check_completeness(
     registry_version: str = "v1.0.0",
     policy_version: str = "v1.0.0",
 ) -> dict[str, Any]:
+    """Verify that all mandatory AP controls were executed and none are missing."""
     verify_tool_permission("control-executor", "validate_check_completeness")
     args: dict[str, Any] = {
         "required_check_ids": required_check_ids,
@@ -618,6 +634,7 @@ def select_final_decision(
     registry_version: str = "v1.0.0",
     completeness_valid: bool = True,
 ) -> dict[str, Any]:
+    """Aggregate all check results into a final READY_FOR_APPROVAL, NEEDS_ATTENTION, or BLOCKED decision."""
     verify_tool_permission("control-executor", "select_final_decision")
     if not completeness_valid:
         raise ValueError("completeness validation failed: mandatory controls missing")
@@ -636,36 +653,43 @@ def select_final_decision(
 # --- Exception Investigator Tools ---
 
 def get_invoice_evidence(run_id: str) -> dict[str, Any]:
+    """Retrieve all raw evidence collected for a run to support exception investigation."""
     verify_tool_permission("exception-investigator", "get_invoice_evidence")
     return get_mcp_client().call_tool("exception-investigator", "get_invoice_evidence", {"run_id": run_id})
 
 
 def get_supplier_candidates(query: str) -> list[dict[str, Any]]:
+    """Search master vendor directory for supplier candidates matching the query."""
     verify_tool_permission("exception-investigator", "get_supplier_candidates")
     return get_mcp_client().call_tool("exception-investigator", "get_supplier_candidates", {"query": query})
 
 
 def get_po_candidates(supplier_id: str, amount: float = 0.0) -> list[dict[str, Any]]:
+    """Retrieve open PO candidates for a supplier that could match the invoice amount."""
     verify_tool_permission("exception-investigator", "get_po_candidates")
     return get_mcp_client().call_tool("exception-investigator", "get_po_candidates", {"supplier_id": supplier_id, "amount": amount})
 
 
 def get_po_lines(po_number: str) -> list[dict[str, Any]]:
+    """Retrieve line items for a specific purchase order."""
     verify_tool_permission("exception-investigator", "get_po_lines")
     return get_mcp_client().call_tool("exception-investigator", "get_po_lines", {"po_number": po_number})
 
 
 def get_policy_rule(rule_key: str) -> dict[str, Any]:
+    """Look up a specific AP policy rule by its key."""
     verify_tool_permission("exception-investigator", "get_policy_rule")
     return get_mcp_client().call_tool("exception-investigator", "get_policy_rule", {"rule_key": rule_key})
 
 
 def get_prior_invoice_matches(supplier_id: str, amount: float) -> list[dict[str, Any]]:
+    """Find previously processed invoices from this supplier with a similar amount."""
     verify_tool_permission("exception-investigator", "get_prior_invoice_matches")
     return get_mcp_client().call_tool("exception-investigator", "get_prior_invoice_matches", {"supplier_id": supplier_id, "amount": amount})
 
 
 def compare_candidate_records(candidate_type: str, candidate_ids: list[str]) -> dict[str, Any]:
+    """Compare multiple candidate records side by side to support exception resolution."""
     verify_tool_permission("exception-investigator", "compare_candidate_records")
     return get_mcp_client().call_tool("exception-investigator", "compare_candidate_records", {"candidate_type": candidate_type, "candidate_ids": candidate_ids})
 
@@ -673,11 +697,13 @@ def compare_candidate_records(candidate_type: str, candidate_ids: list[str]) -> 
 # --- Workflow Improvement Analyst Tools ---
 
 def get_feedback_events(limit: int = 50) -> list[dict[str, Any]]:
+    """Retrieve recent reviewer correction events for workflow improvement analysis."""
     verify_tool_permission("workflow-improvement-analyst", "get_feedback_events")
     return get_mcp_client().call_tool("workflow-improvement-analyst", "get_feedback_events", {"limit": limit})
 
 
 def group_feedback_patterns(feedback_events: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Group feedback events into recurring patterns that suggest a policy improvement."""
     verify_tool_permission("workflow-improvement-analyst", "group_feedback_patterns")
     return get_mcp_client().call_tool("workflow-improvement-analyst", "group_feedback_patterns", {"feedback_events": feedback_events})
 
@@ -687,6 +713,7 @@ def create_candidate_version(
     diff_payload: dict[str, Any],
     candidate_version: str,
 ) -> dict[str, Any]:
+    """Create a bounded candidate policy version from an improvement diff payload."""
     verify_tool_permission("workflow-improvement-analyst", "create_candidate_version")
     return get_mcp_client().call_tool(
         "workflow-improvement-analyst",
@@ -700,6 +727,7 @@ def create_candidate_version(
 
 
 def run_regression_suite(candidate_version: str, dataset_version: str = "v1") -> dict[str, Any]:
+    """Run the regression test suite against a candidate policy version."""
     verify_tool_permission("workflow-improvement-analyst", "run_regression_suite")
     return get_mcp_client().call_tool(
         "workflow-improvement-analyst",
@@ -709,6 +737,7 @@ def run_regression_suite(candidate_version: str, dataset_version: str = "v1") ->
 
 
 def verify_regression_results(regression_run_id: str) -> dict[str, Any]:
+    """Verify regression results and confirm all critical tests passed."""
     verify_tool_permission("workflow-improvement-analyst", "verify_regression_results")
     return get_mcp_client().call_tool(
         "workflow-improvement-analyst",

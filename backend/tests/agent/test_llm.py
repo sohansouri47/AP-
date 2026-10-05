@@ -8,7 +8,7 @@ from app.agent.llm import (
     is_openai_configured,
     QuotaResilientChatOpenAI,
 )
-from app.agent.main_agent import build_deep_agent_ap_employee
+from app.agent.deep_agent import build_ap_employee_deep_agent as build_deep_agent_ap_employee
 
 
 def test_openai_configuration_detection():

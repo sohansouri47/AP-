@@ -14,7 +14,7 @@
 set -e
 
 # ── Config ──────────────────────────────────────────────────────
-EC2_HOST="54.146.154.73"
+EC2_HOST="100.26.131.63"
 EC2_USER="ubuntu"
 EC2_KEY="$HOME/Downloads/ap.pem"
 APP_DIR="~/zamp-ap"

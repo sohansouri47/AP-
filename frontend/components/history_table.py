@@ -54,8 +54,9 @@ def render_run_history(client: BackendAPIClient) -> str | None:
         status_options = [
             "All",
             "POSTING_PACKAGE_READY",
-            "AP_REVIEW",
-            "FINANCE_APPROVAL",
+            "READY_FOR_APPROVAL",
+            "NEEDS_ATTENTION",
+            "BLOCKED",
             "REJECTED",
         ]
         status_filter = st.selectbox(
@@ -120,14 +121,23 @@ def render_run_history(client: BackendAPIClient) -> str | None:
         inv = row.get("invoice_number")
         inv_str = str(inv) if pd.notnull(inv) and str(inv).strip() not in ("nan", "None", "") else "—"
 
+        status_short_map = {
+            "POSTING_PACKAGE_READY": "Posted",
+            "READY_FOR_APPROVAL": "Awaiting Approval",
+            "NEEDS_ATTENTION": "AP Review",
+            "BLOCKED": "Blocked",
+            "REJECTED": "Rejected",
+            "START": "Initializing",
+        }
+        st_display = status_short_map.get(str(row.get("lifecycle_status", "")), st_clean)
         formatted_rows.append({
             "Run ID": raw_id,
             "Supplier": supp_str,
             "Invoice": inv_str,
             "Amount": amt_str,
-            "Route": str(row.get("workflow_version", "v1.0.0")),
-            "Status": st_clean,
-            "Updated": ts_str,
+            "Policy": str(row.get("workflow_version", "v1.0.0")),
+            "Status": st_display,
+            "Started": ts_str,
         })
 
     display_df = pd.DataFrame(formatted_rows)

@@ -123,7 +123,7 @@ class BackendAPIClient:
     def stream_events(self, thread_id: str) -> Generator[dict[str, Any], None, None]:
         """Synchronous generator streaming SSE events from GET /api/invoices/{thread_id}/events."""
         url = f"{self.base_url}/api/invoices/{thread_id}/events"
-        with httpx.Client(timeout=60.0) as client:
+        with httpx.Client(timeout=httpx.Timeout(10.0, read=300.0)) as client:
             with client.stream("GET", url) as response:
                 if response.status_code != 200:
                     raise RuntimeError(f"Failed to connect to event stream ({response.status_code})")

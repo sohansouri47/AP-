@@ -30,6 +30,7 @@ from app.agent.mcp_tools import (
     WORKFLOW_IMPROVEMENT_ALLOWLIST,
     verify_tool_permission,
     global_check_registry,
+    get_required_checks,
     check_file_duplicate,
     resolve_supplier,
     check_business_duplicate,
@@ -60,6 +61,7 @@ from app.agent.mcp_tools import (
 )
 from app.agent.observability import TraceObserver
 from app.agent.flow_logger import flow_logger
+from app.events import emit_event, current_run_id
 from app.agent.prompts import (
     CONTROL_EXECUTOR_SYSTEM_PROMPT,
     EXCEPTION_INVESTIGATOR_SYSTEM_PROMPT,
@@ -69,6 +71,79 @@ from app.agent.prompts import (
     format_workflow_improvement_task,
     AMBIGUOUS_PO_QUESTION,
 )
+
+
+def _emit_live(event_type: str, data: dict) -> None:
+    """Emit an event to the live SSE bus using the current run's thread_id."""
+    try:
+        tid = current_run_id.get("")
+        if tid:
+            emit_event(tid, event_type, data)
+    except Exception:
+        pass
+
+
+def _wrap_control_tool(fn: Any) -> Any:
+    """Wrap a control tool so it emits control_completed to the SSE bus immediately on return.
+
+    Uses functools.wraps so deepagents SDK sees the original signature/docstring.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def _live_tool(*args, **kwargs):
+        t0 = time.time()
+        result = fn(*args, **kwargs)
+        latency_ms = (time.time() - t0) * 1000
+        try:
+            if isinstance(result, dict) and result.get("check_id"):
+                cid = result["check_id"]
+                status = result.get("status", "PASSED")
+                message = result.get("message", "")
+                _emit_live("control_completed", {
+                    "check_id": cid,
+                    "status": status,
+                    "message": message,
+                    "latency_ms": latency_ms,
+                })
+                if status in ("FAILED", "REQUIRES_INPUT"):
+                    _emit_live("exception_raised", {
+                        "check_id": cid,
+                        "status": status,
+                        "message": message,
+                    })
+                if cid == "CHK_SUPPLIER_RES":
+                    raw = result.get("raw_output") or {}
+                    _emit_live("supplier_resolved", {
+                        "supplier_id": raw.get("supplier_id"),
+                        "supplier_name": raw.get("supplier_name") or raw.get("vendor_name"),
+                    })
+        except Exception:
+            pass
+        return result
+
+    return _live_tool
+
+
+def _wrap_extract_invoice(fn: Any) -> Any:
+    """Wrap extract_invoice so it emits extraction_completed immediately when the LLM tool returns."""
+    import functools
+
+    @functools.wraps(fn)
+    def _live_extract(*args, **kwargs):
+        result = fn(*args, **kwargs)
+        try:
+            extracted = result.get("extracted_data", result) if isinstance(result, dict) else {}
+            _emit_live("extraction_completed", {
+                "invoice_number": extracted.get("invoice_number"),
+                "supplier_name": extracted.get("supplier_name"),
+                "total_amount": extracted.get("total_amount"),
+            })
+        except Exception:
+            pass
+        return result
+
+    return _live_extract
 
 
 # =====================================================================
@@ -82,6 +157,24 @@ def get_control_executor_subagent_spec() -> dict[str, Any]:
         "description": "Executes mandatory AP financial controls via MCP tools, validates completeness, and selects deterministic decision.",
         "system_prompt": CONTROL_EXECUTOR_SYSTEM_PROMPT,
         "mode": "isolated",
+        "tools": [
+            get_required_checks,   # must be first — subagent calls this to know which checks to run
+            _wrap_control_tool(check_file_duplicate),
+            _wrap_control_tool(resolve_supplier),
+            _wrap_control_tool(check_business_duplicate),
+            _wrap_control_tool(check_remit_change),
+            _wrap_control_tool(check_arithmetic),
+            _wrap_control_tool(check_dates_currency),
+            _wrap_control_tool(identify_purchase_order),
+            _wrap_control_tool(validate_po_header),
+            _wrap_control_tool(match_po_lines),
+            _wrap_control_tool(calculate_po_remaining),
+            _wrap_control_tool(evaluate_po_tolerances),
+            _wrap_control_tool(evaluate_no_po_policy),
+            _wrap_control_tool(select_approval_route),
+            validate_check_completeness,
+            select_final_decision,
+        ],
     }
 
 
@@ -92,6 +185,15 @@ def get_exception_investigator_subagent_spec() -> dict[str, Any]:
         "description": "Investigates unresolved AP exceptions, ambiguous vendors, and PO candidates using read-only evidence tools.",
         "system_prompt": EXCEPTION_INVESTIGATOR_SYSTEM_PROMPT,
         "mode": "isolated",
+        "tools": [
+            get_invoice_evidence,
+            get_supplier_candidates,
+            get_po_candidates,
+            get_po_lines,
+            get_policy_rule,
+            get_prior_invoice_matches,
+            compare_candidate_records,
+        ],
     }
 
 
@@ -102,6 +204,13 @@ def get_workflow_improvement_subagent_spec() -> dict[str, Any]:
         "description": "Analyzes recurring reviewer corrections, drafts bounded candidate improvements, and executes regression tests.",
         "system_prompt": WORKFLOW_IMPROVEMENT_SYSTEM_PROMPT,
         "mode": "isolated",
+        "tools": [
+            get_feedback_events,
+            group_feedback_patterns,
+            create_candidate_version,
+            run_regression_suite,
+            verify_regression_results,
+        ],
     }
 
 
@@ -116,6 +225,8 @@ def execute_controls(
     policy_version: str = "v1.0.0",
     tracer: TraceObserver | None = None,
     skip_checks: list[str] | None = None,
+    human_action: dict[str, Any] | None = None,
+    suppress_live_events: bool = False,
 ) -> ControlExecutionReport:
     """Execute all applicable AP controls deterministically via MCP tools.
     
@@ -126,6 +237,11 @@ def execute_controls(
     """
     start_time = time.time()
     skip_set = set(skip_checks or [])
+
+    # Apply human PO selection: override po_number so downstream checks use the resolved PO
+    # Coerce to str — LLM extraction may return None for po_number, which crashes MCP tool validation
+    resolved_po = str((human_action or {}).get("selected_po") or extracted_invoice.get("po_number") or "")
+
 
     # 1. get_required_checks
     t0 = time.time()
@@ -168,10 +284,10 @@ def execute_controls(
             extracted_invoice.get("due_date", ""),
             extracted_invoice.get("currency", "USD"),
         ),
-        "CHK_PO_IDENT": lambda: identify_purchase_order(invoice_reference, extracted_invoice.get("po_number", "")),
-        "CHK_PO_HEADER": lambda: validate_po_header(extracted_invoice.get("po_number", "PO-9001"), extracted_invoice.get("supplier_id", "SUPP-001")),
-        "CHK_PO_LINES": lambda: match_po_lines(extracted_invoice.get("po_number", "PO-9001"), extracted_invoice.get("lines")),
-        "CHK_PO_REMAIN": lambda: calculate_po_remaining(extracted_invoice.get("po_number", "PO-9001"), extracted_invoice.get("total_amount", 0.0)),
+        "CHK_PO_IDENT": lambda: identify_purchase_order(invoice_reference, resolved_po),
+        "CHK_PO_HEADER": lambda: validate_po_header(resolved_po or "PO-9001", extracted_invoice.get("supplier_id", "SUPP-001")),
+        "CHK_PO_LINES": lambda: match_po_lines(resolved_po or "PO-9001", extracted_invoice.get("lines")),
+        "CHK_PO_REMAIN": lambda: calculate_po_remaining(resolved_po or "PO-9001", extracted_invoice.get("total_amount", 0.0)),
         "CHK_PO_TOL": lambda: evaluate_po_tolerances(extracted_invoice.get("lines")),
         "CHK_NO_PO_POL": lambda: evaluate_no_po_policy(extracted_invoice.get("total_amount", 0.0)),
         "CHK_APP_ROUTE": lambda: select_approval_route(extracted_invoice.get("total_amount", 0.0)),
@@ -182,10 +298,41 @@ def execute_controls(
         if cid not in tool_map:
             tool_map[cid] = fn
 
+    # PO-dependent checks that must be skipped when PO identity is unresolved
+    PO_DEPENDENT_CHECKS = {"CHK_PO_HEADER", "CHK_PO_LINES", "CHK_PO_REMAIN", "CHK_PO_TOL"}
+    po_unresolved = False  # set True when CHK_PO_IDENT returns REQUIRES_INPUT
+
     # Execute checks
     for check in required_checks:
         cid = check.check_id
         if cid in skip_set:
+            continue
+
+        # Skip downstream PO checks if the PO identity is still ambiguous
+        if po_unresolved and cid in PO_DEPENDENT_CHECKS:
+            cr = CheckResult(
+                check_id=cid,
+                tool_name=check.tool_name,
+                status="SKIPPED",
+                message="Skipped — purchase order not yet identified",
+                raw_output={},
+            )
+            check_results.append(cr)
+            completed_check_ids.append(cid)
+            if not suppress_live_events:
+                _emit_live("control_completed", {
+                    "check_id": cid,
+                    "status": "SKIPPED",
+                    "message": cr.message,
+                    "latency_ms": 0.0,
+                })
+            flow_logger.tool_call(
+                caller="control-executor",
+                tool_name=check.tool_name,
+                status="SKIPPED",
+                details=f"[{cid}] {cr.message}",
+                duration_ms=0.0,
+            )
             continue
 
         handler = tool_map.get(cid)
@@ -224,7 +371,27 @@ def execute_controls(
         if cid == "CHK_SUPPLIER_RES" and res_dict.get("raw_output", {}).get("supplier_id"):
             if not extracted_invoice.get("supplier_id"):
                 extracted_invoice["supplier_id"] = res_dict["raw_output"]["supplier_id"]
+            if not suppress_live_events:
+                _emit_live("supplier_resolved", {
+                    "supplier_name": extracted_invoice.get("supplier_name"),
+                    "supplier_id": extracted_invoice.get("supplier_id") or res_dict["raw_output"].get("supplier_id"),
+                    "invoice_number": extracted_invoice.get("invoice_number"),
+                    "total_amount": extracted_invoice.get("total_amount"),
+                })
 
+        if not suppress_live_events:
+            _emit_live("control_completed", {
+                "check_id": cr.check_id,
+                "status": cr.status,
+                "message": cr.message,
+                "latency_ms": (time.time() - t_call) * 1000 if 't_call' in locals() else 0.0,
+            })
+            if cr.status in ("FAILED", "REQUIRES_INPUT"):
+                _emit_live("exception_raised", {
+                    "check_id": cr.check_id,
+                    "status": cr.status,
+                    "message": cr.message,
+                })
 
         flow_logger.tool_call(
             caller="control-executor",
@@ -243,6 +410,8 @@ def execute_controls(
                     candidates=cr.raw_output.get("candidates", []),
                 )
             )
+            if cid == "CHK_PO_IDENT":
+                po_unresolved = True
 
     # 3. validate_check_completeness
     t_comp = time.time()
@@ -292,6 +461,11 @@ def execute_controls(
             decision.status,
             f"Revision: {decision.revision} | Role: {decision.required_role} | {decision.summary}",
         )
+        if not suppress_live_events:
+            _emit_live("decision_ready", {
+                "lifecycle_status": decision.status,
+                "decision": dec_dict,
+            })
         flow_logger.subagent_end(
             "control-executor",
             "COMPLETED",
@@ -324,6 +498,7 @@ def execute_controls(
 def investigate_exceptions(
     run_id: str,
     control_report: ControlExecutionReport,
+    extracted_invoice: dict[str, Any] | None = None,
     tracer: TraceObserver | None = None,
 ) -> InvestigationResult:
     """Investigate unresolved check items using read-only evidence MCP tools."""
@@ -343,10 +518,27 @@ def investigate_exceptions(
     cid = item.check_id
     flow_logger.subagent_start("exception-investigator", "investigate_exceptions", f"Investigating check {cid} ({item.item_type}): {item.description}")
 
+    # Derive supplier_id and amount from the actual invoice
+    inv = extracted_invoice or {}
+    supplier_id = inv.get("supplier_id") or ""
+    total_amount = float(inv.get("total_amount") or 0.0)
+
+    # Fall back to CHK_SUPPLIER_RES raw_output if supplier_id wasn't in extracted_invoice
+    if not supplier_id:
+        supplier_res = next(
+            (c for c in control_report.check_results if c.check_id == "CHK_SUPPLIER_RES"),
+            None,
+        )
+        if supplier_res:
+            supplier_id = supplier_res.raw_output.get("supplier_id", "")
+
+    # Candidate IDs come from the unresolved item (populated from CHK_PO_IDENT raw_output.candidates)
+    candidate_ids = [str(c) for c in item.candidates] if item.candidates else []
+
     # Call read-only evidence tools
     evidence_res = get_invoice_evidence(run_id)
-    po_candidates_res = get_po_candidates("SUPP-002", 2592.00)
-    comparison_res = compare_candidate_records("PURCHASE_ORDER", ["PO-2001", "PO-2002"])
+    po_candidates_res = get_po_candidates(supplier_id, total_amount)
+    comparison_res = compare_candidate_records("PURCHASE_ORDER", candidate_ids) if candidate_ids else {"comparisons": []}
 
     flow_logger.tool_call("exception-investigator", "get_invoice_evidence", "SUCCESS", f"Found {len(evidence_res.get('evidence', []))} evidence fields")
     flow_logger.tool_call("exception-investigator", "get_po_candidates", "SUCCESS", f"Found {len(po_candidates_res)} open PO candidates")
@@ -354,7 +546,7 @@ def investigate_exceptions(
 
     if tracer:
         tracer.log_mcp_tool_call("get_invoice_evidence", "exception-investigator", {"run_id": run_id}, evidence_res)
-        tracer.log_mcp_tool_call("get_po_candidates", "exception-investigator", {"supplier_id": "SUPP-002"}, po_candidates_res)
+        tracer.log_mcp_tool_call("get_po_candidates", "exception-investigator", {"supplier_id": supplier_id, "amount": total_amount}, po_candidates_res)
         tracer.log_mcp_tool_call("compare_candidate_records", "exception-investigator", {}, comparison_res)
 
     evidence_summary = [
@@ -371,6 +563,10 @@ def investigate_exceptions(
         for c in comparison_res.get("comparisons", [])
     ]
 
+    # Derive allowed actions from actual candidate IDs (e.g. PO-2001 -> SELECT_PO_2001)
+    select_actions = [f"SELECT_{cid.replace('-', '_')}" for cid in candidate_ids]
+    allowed_actions = select_actions + ["REJECT_INVOICE"]
+
     inv_result = InvestigationResult(
         exception_type=item.item_type,
         evidence_summary=evidence_summary,
@@ -378,8 +574,8 @@ def investigate_exceptions(
         recommendation=None,  # Genuine ambiguity: must not guess
         human_input_required=True,
         specific_question=AMBIGUOUS_PO_QUESTION,
-        allowed_actions=["SELECT_PO_2001", "SELECT_PO_2002", "REJECT_INVOICE"],
-        affected_check_ids=[cid, "CHK_PO_HEADER", "CHK_PO_LINES", "CHK_PO_REMAIN", "CHK_PO_TOL"],
+        allowed_actions=allowed_actions,
+        affected_check_ids=[item.check_id, "CHK_PO_HEADER", "CHK_PO_LINES", "CHK_PO_REMAIN", "CHK_PO_TOL"],
     )
 
     flow_logger.subagent_end(

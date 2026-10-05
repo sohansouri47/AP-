@@ -1,102 +1,107 @@
-"""Governance Component.
-
-Surfaces continuous workflow improvement, version management, and regression gates.
-"""
+"""Governance Component — Policy & Self-Learning overview."""
 
 from __future__ import annotations
-
-import json
-from typing import Any
 import streamlit as st
-
 from api_client import BackendAPIClient
 
 
 def render_governance_page(client: BackendAPIClient):
-    """Render the Workflow Governance and Continuous Improvement view."""
-    st.markdown("### 🏛️ Financial Policy & Workflow Governance")
+    st.markdown("## Policy & Self-Learning Governance")
     st.markdown(
-        """
-        The Accounts Payable AI Employee enforces **bounded autonomous self-improvement**. 
-        Changes to mapping rules, tolerances, or supplier aliases are never directly deployed; 
-        they are staged as versioned candidates and must pass a 50-test golden regression gate before named Administrator sign-off.
-        """
+        "The AP AI Employee enforces a **gated self-improvement loop** — every policy change is staged, "
+        "regression-tested against 50 golden cases, and requires named Administrator sign-off before going live. "
+        "Nothing touches production automatically.",
+        unsafe_allow_html=False,
     )
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Active Policy Version", "v1.0.0", delta="Production Active")
-    c2.metric("Golden Regression Gate", "50 / 50 Passing", delta="0 Violations")
-    c3.metric("Rollback Target", "v1.0.0", delta="Known-Good")
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    st.markdown("---")
+    # ── Active policy banner ──────────────────────────────────────────
+    st.markdown(
+        """
+        <div style="display:flex; align-items:center; gap:12px; background:#f0fdf4;
+                    border:1px solid #bbf7d0; border-radius:10px; padding:14px 20px; margin-bottom:24px;">
+            <span style="font-size:1.5rem;">🛡️</span>
+            <div>
+                <div style="font-weight:700; color:#166534; font-size:0.95rem;">Active Policy: v1.0.0</div>
+                <div style="color:#15803d; font-size:0.8rem;">Production · 13 controls · 0 violations · Rollback-ready</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    col_left, col_right = st.columns([1, 1])
+    # ── How it works ─────────────────────────────────────────────────
+    st.markdown("#### How the improvement loop works")
+    steps = [
+        ("01", "Feedback ingestion", "AP operators' manual corrections are captured after every run."),
+        ("02", "Pattern detection", "The agent groups recurring corrections into actionable patterns (≥ 2 occurrences)."),
+        ("03", "Candidate staging", "A bounded declarative diff is staged as an inactive candidate version (e.g. v1.1.0)."),
+        ("04", "Regression gate", "50 golden test cases run against the candidate — zero regressions required to proceed."),
+        ("05", "Admin sign-off", "A named Administrator reviews and approves before anything goes live."),
+    ]
 
-    with col_left:
-        st.markdown("#### 🔄 Continuous Improvement Lifecycle")
-        st.markdown(
-            """
-            1. **Reviewer Feedback Ingestion:** Captures AP operator corrections (e.g. SKU line mappings).
-            2. **Pattern Synthesis:** `WorkflowImprovementAnalyst` groups recurring corrections (frequency ≥ 2).
-            3. **Candidate Staging:** Produces bounded declarative diff (e.g. candidate `v1.1.0`).
-            4. **Regression Gate Execution:** Validates candidate against golden test dataset without touching production state.
-            5. **Administrator Sign-off:** Requires named administrator authentication (`activate_workflow_version`).
-            """
-        )
-
-        st.markdown("##### 📝 Operator Feedback Log (Recent Corrections)")
-        mock_feedback = [
-            {
-                "feedback_id": "FB-001",
-                "invoice_number": "INV-2026-002",
-                "user_id": "ap_operator_sarah",
-                "target_type": "PO_LINE_MAPPING",
-                "correction": "Mapped Router SKU A100 to PO-2001 Line 1",
-            },
-            {
-                "feedback_id": "FB-002",
-                "invoice_number": "INV-2026-005",
-                "user_id": "ap_operator_marcus",
-                "target_type": "PO_LINE_MAPPING",
-                "correction": "Mapped Router SKU A100 to PO-2001 Line 1",
-            },
-        ]
-        st.dataframe(mock_feedback, use_container_width=True, hide_index=True)
-
-    with col_right:
-        st.markdown("#### 🧪 Staged Candidate Evaluation")
-        st.markdown(
-            """
-            <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <span style="font-weight: 700; color: #1e293b;">Candidate: <code>v1.1.0-staged</code></span>
-                    <span style="background: #fef3c7; color: #92400e; font-size: 0.72rem; font-weight: 700; padding: 2px 8px; border-radius: 9999px;">STAGED (INACTIVE)</span>
-                </div>
-                <div style="font-size: 0.8rem; color: #475569; margin-bottom: 8px;">
-                    Target: <code>PO_LINE_MAPPING</code> — Automate SKU A100 line assignment based on verified operator feedback PAT-001.
-                </div>
-                <pre style="background: #0f172a; color: #f8fafc; padding: 10px; border-radius: 6px; font-size: 0.75rem;">
-{
-  "target_type": "PO_LINE_MAPPING",
-  "diff": {
-    "sku_map": {
-      "A100": 1
-    }
-  },
-  "candidate_version": "v1.1.0"
-}
-                </pre>
+    cols = st.columns(len(steps))
+    for col, (num, title, desc) in zip(cols, steps):
+        col.markdown(
+            f"""
+            <div style="text-align:center; padding:12px 8px;">
+                <div style="font-size:1.4rem; font-weight:800; color:#3b82f6;">{num}</div>
+                <div style="font-weight:600; font-size:0.82rem; color:#1e293b; margin:4px 0;">{title}</div>
+                <div style="font-size:0.75rem; color:#64748b; line-height:1.4;">{desc}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
-        st.markdown("##### 🛡️ Regression Safety Verification")
-        st.markdown(
-            """
-            - **Dataset Version:** `v1-golden` (50 synthetic edge cases)
-            - **Critical Security Controls:** 100% Passed (Double payment, bank fraud, tax tampering)
-            - **Regression Delta:** 0 regressions detected
-            """
+    st.markdown("---")
+
+    # ── Coming-soon capabilities ──────────────────────────────────────
+    st.markdown("#### Planned autonomous improvements")
+
+    capabilities = [
+        (
+            "PO Line Mapping",
+            "Learns recurring SKU → PO line corrections and auto-maps them in future runs.",
+            "Eliminate manual re-mapping for known SKUs",
+        ),
+        (
+            "Tolerance Tuning",
+            "Detects when operators repeatedly approve the same variance and proposes an adjusted threshold.",
+            "Reduce false-positive flags per supplier",
+        ),
+        (
+            "Supplier Alias Rules",
+            "Captures repeated manual supplier corrections and stages an alias so future invoices resolve automatically.",
+            "Zero-touch supplier resolution for known aliases",
+        ),
+    ]
+
+    c1, c2, c3 = st.columns(3)
+    for col, (name, desc, benefit) in zip([c1, c2, c3], capabilities):
+        col.markdown(
+            f"""
+            <div style="border:1px solid #e2e8f0; border-radius:10px; padding:18px; background:#fafafa; height:100%;">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px;">
+                    <div style="font-weight:700; font-size:0.88rem; color:#1e293b;">{name}</div>
+                    <span style="background:#fef9c3; color:#92400e; font-size:0.68rem; font-weight:700;
+                                 padding:2px 8px; border-radius:9999px; white-space:nowrap; margin-left:8px;">Coming Soon</span>
+                </div>
+                <div style="font-size:0.78rem; color:#64748b; margin-bottom:10px; line-height:1.5;">{desc}</div>
+                <div style="font-size:0.75rem; color:#3b82f6; font-weight:600;">→ {benefit}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+
+    # ── Disabled trigger ──────────────────────────────────────────────
+    col_btn, col_note = st.columns([1, 2])
+    with col_btn:
+        st.button("Run Improvement Analysis", disabled=True, type="primary")
+    with col_note:
+        st.caption(
+            "Will analyze recent corrections, stage a candidate, run the regression gate, "
+            "and surface an Administrator approval request — all without touching production."
         )

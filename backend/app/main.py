@@ -40,9 +40,24 @@ from app.db.repository import (
 from app.agent.graph import create_invoice_graph
 from app.agent.persistence import get_checkpointer, get_postgres_saver
 from app.agent.mcp_client import get_mcp_client
+from app.events import EVENT_BUS, RUN_COMPLETE, RUNS_ACTIVE, emit_event, current_run_id
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ap_api")
+
+# Register Langfuse LangChain callback so deep-agent LLM calls appear in traces
+try:
+    import os
+    from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
+    _lf_handler = LangfuseCallbackHandler(
+        public_key=os.getenv("LANGFUSE_PUBLIC_KEY", ""),
+        secret_key=os.getenv("LANGFUSE_SECRET_KEY", ""),
+        host=os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com"),
+    )
+    os.environ.setdefault("_LANGFUSE_HANDLER_READY", "1")
+    logger.info("Langfuse LangChain callback handler registered")
+except Exception:
+    _lf_handler = None
 
 UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -61,8 +76,77 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory and persistent event tracking for visible SSE live-runs
-EVENT_BUS: dict[str, list[dict[str, Any]]] = {}
+# EVENT_BUS, RUN_COMPLETE, emit_event, current_run_id imported from app.events
+
+
+async def _run_graph_background(
+    thread_id: str,
+    initial_state: dict[str, Any],
+    config: dict[str, Any],
+    file_path_str: str,
+    workflow_version: str,
+) -> None:
+    """Run graph.invoke() in a thread pool so the event loop stays free for SSE."""
+    from app.agent.graph import create_invoice_graph as _create_graph
+    graph = _create_graph()
+    # Set ContextVar so agent submodules can emit events from the worker thread
+    current_run_id.set(thread_id)
+    RUNS_ACTIVE.add(thread_id)
+    try:
+        await asyncio.to_thread(graph.invoke, initial_state, config)
+    except Exception as exc:
+        logger.exception("Background graph error for %s: %s", thread_id, exc)
+        emit_event(thread_id, "execution_error", {"error": str(exc)})
+    finally:
+        RUNS_ACTIVE.discard(thread_id)
+        state = graph.get_state(config)
+        lifecycle_status = (state.values or {}).get("lifecycle_status", "UNKNOWN")
+        interrupt_payload = _extract_interrupt_payload(state)
+        try:
+            update_processing_run_db(
+                run_id=thread_id,
+                lifecycle_status=lifecycle_status,
+                completed=not bool(interrupt_payload),
+            )
+        except Exception as exc:
+            logger.warning("Could not update processing run in DB: %s", exc)
+        derive_events_from_state(thread_id, state.values if state else {}, file_path_str)
+        RUN_COMPLETE[thread_id] = True
+        logger.info("Background graph complete: %s → %s", thread_id, lifecycle_status)
+
+
+async def _resume_graph_background(
+    thread_id: str,
+    resume_action: dict[str, Any],
+    config: dict[str, Any],
+) -> None:
+    """Resume graph from a human interrupt in a background thread."""
+    from app.agent.graph import create_invoice_graph as _create_graph
+    graph = _create_graph()
+    current_run_id.set(thread_id)
+    RUN_COMPLETE[thread_id] = False  # reopen SSE stream for this run
+    RUNS_ACTIVE.add(thread_id)
+    try:
+        await asyncio.to_thread(graph.invoke, Command(resume=resume_action), config)
+    except Exception as exc:
+        logger.exception("Background resume error for %s: %s", thread_id, exc)
+        emit_event(thread_id, "execution_error", {"error": str(exc)})
+    finally:
+        RUNS_ACTIVE.discard(thread_id)
+        state = graph.get_state(config)
+        lifecycle_status = (state.values or {}).get("lifecycle_status", "UNKNOWN")
+        interrupt_payload = _extract_interrupt_payload(state)
+        try:
+            update_processing_run_db(
+                run_id=thread_id,
+                lifecycle_status=lifecycle_status,
+                completed=not bool(interrupt_payload),
+            )
+        except Exception as exc:
+            logger.warning("Could not update processing run in DB: %s", exc)
+        derive_events_from_state(thread_id, state.values if state else {})
+        RUN_COMPLETE[thread_id] = True
+        logger.info("Background resume complete: %s → %s", thread_id, lifecycle_status)
 
 
 # ---------------------------------------------------------------------
@@ -99,18 +183,6 @@ class InvoiceExecutionResponse(BaseModel):
 # ---------------------------------------------------------------------
 # Event Management Helper Functions
 # ---------------------------------------------------------------------
-
-def emit_event(thread_id: str, event_type: str, data: dict[str, Any]) -> None:
-    """Record a real-time lifecycle event into the thread event stream."""
-    if thread_id not in EVENT_BUS:
-        EVENT_BUS[thread_id] = []
-    EVENT_BUS[thread_id].append({
-        "event": event_type,
-        "thread_id": thread_id,
-        "timestamp": time.time(),
-        "data": data,
-    })
-
 
 def derive_events_from_state(thread_id: str, state_values: dict[str, Any], initial_ref: str = "") -> list[dict[str, Any]]:
     """Synthesize canonical sequence of genuine backend events:
@@ -325,51 +397,17 @@ async def upload_invoice(
         "human_action_history": [],
     }
 
-    try:
-        graph.invoke(initial_state, config=config)
-    except Exception as e:
-        logger.exception("Graph execution error")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error executing invoice graph: {str(e)}",
-        )
-
-    # 5. Inspect snapshot from PostgresSaver
-    state = graph.get_state(config)
-    interrupt_payload = _extract_interrupt_payload(state)
-    lifecycle_status = state.values.get("lifecycle_status", "UNKNOWN")
-
-    # Update processing run status in DB
-    try:
-        update_processing_run_db(
-            run_id=thread_id,
-            lifecycle_status=lifecycle_status,
-            completed=not bool(interrupt_payload),
-        )
-    except Exception as e:
-        logger.warning(f"Could not update processing run in DB: {e}")
-
-    # Derive full canonical events for visible live-run stepper
-    derive_events_from_state(thread_id, state.values, file_path_str)
-
-    is_interrupted = bool(interrupt_payload)
-    msg = (
-        f"Invoice execution paused for {interrupt_payload.get('type')}"
-        if is_interrupted
-        else f"Invoice processed with final status: {lifecycle_status}"
+    # 4b. Launch graph in background — return thread_id immediately so SSE can start
+    asyncio.create_task(
+        _run_graph_background(thread_id, initial_state, config, file_path_str, workflow_version)
     )
 
     return InvoiceExecutionResponse(
         thread_id=thread_id,
         run_id=thread_id,
-        lifecycle_status=lifecycle_status,
-        is_interrupted=is_interrupted,
-        interrupt=interrupt_payload,
-        extracted_invoice=state.values.get("extracted_invoice"),
-        control_report=state.values.get("control_report"),
-        decision=state.values.get("decision"),
-        posting_package=state.values.get("posting_package"),
-        message=msg,
+        lifecycle_status="PROCESSING",
+        is_interrupted=False,
+        message="Invoice ingested — processing started in background.",
     )
 
 
@@ -433,7 +471,8 @@ async def resume_invoice_run(thread_id: str, payload: HumanResumeRequest):
     # Emit human action event
     emit_event(thread_id, "human_action_received", payload.model_dump())
 
-    # 3. Resume graph execution via Command(resume=...)
+    # 3. Resume graph execution in background (same pattern as initial upload)
+    # Running synchronously here blocks the event loop for 30-60s and causes frontend timeouts.
     resume_action = {
         "action": payload.action,
         "role": payload.role,
@@ -443,39 +482,13 @@ async def resume_invoice_run(thread_id: str, payload: HumanResumeRequest):
         "reason": payload.reason,
     }
 
-    try:
-        graph.invoke(Command(resume=resume_action), config=config)
-    except PermissionError as pe:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(pe))
-    except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(ve))
-    except Exception as e:
-        logger.exception("Error resuming invoice graph")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    asyncio.create_task(_resume_graph_background(thread_id, resume_action, config))
 
-    # 4. Read updated snapshot from PostgresSaver
-    new_state = graph.get_state(config)
-    next_interrupt = _extract_interrupt_payload(new_state)
-    lifecycle_status = new_state.values.get("lifecycle_status", "UNKNOWN")
-
-    try:
-        update_processing_run_db(
-            run_id=thread_id,
-            lifecycle_status=lifecycle_status,
-            completed=not bool(next_interrupt),
-        )
-    except Exception as e:
-        logger.warning(f"Could not update processing run in DB: {e}")
-
-    # Derive events after resumption
-    derive_events_from_state(thread_id, new_state.values)
-
-    is_interrupted = bool(next_interrupt)
-    msg = (
-        f"Invoice advanced to next review gate: {next_interrupt.get('type')}"
-        if is_interrupted
-        else f"Invoice resumed and finalized with status: {lifecycle_status}"
-    )
+    # Return immediately — frontend will poll /status for the updated state
+    lifecycle_status = state.values.get("lifecycle_status", "NEEDS_ATTENTION")
+    next_interrupt = interrupt_payload
+    is_interrupted = True
+    msg = f"Resume accepted — processing in background"
 
     return InvoiceExecutionResponse(
         thread_id=thread_id,
@@ -483,10 +496,10 @@ async def resume_invoice_run(thread_id: str, payload: HumanResumeRequest):
         lifecycle_status=lifecycle_status,
         is_interrupted=is_interrupted,
         interrupt=next_interrupt,
-        extracted_invoice=new_state.values.get("extracted_invoice"),
-        control_report=new_state.values.get("control_report"),
-        decision=new_state.values.get("decision"),
-        posting_package=new_state.values.get("posting_package"),
+        extracted_invoice=state.values.get("extracted_invoice"),
+        control_report=state.values.get("control_report"),
+        decision=state.values.get("decision"),
+        posting_package=state.values.get("posting_package"),
         message=msg,
     )
 
@@ -523,34 +536,62 @@ def get_invoice_status(thread_id: str):
 
 @app.get("/api/invoices/{thread_id}/events")
 async def stream_invoice_events(thread_id: str):
-    """SSE stream of genuine backend events:
-    uploaded -> extraction_started -> supplier_resolved -> control_completed ->
-    exception_raised -> decision_ready -> human_action_received -> posting_package_ready
-    """
+    """SSE stream: streams events live as they are emitted during graph execution."""
     config = {"configurable": {"thread_id": thread_id}}
     graph = create_invoice_graph()
-    state = graph.get_state(config)
-
-    if not state.values and thread_id not in EVENT_BUS:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Run '{thread_id}' not found for event streaming.",
-        )
-
-    # Derive canonical events from state
-    events = derive_events_from_state(thread_id, state.values if state else {})
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        for ev in events:
-            yield f"data: {json.dumps(ev)}\n\n"
-            await asyncio.sleep(0.08)  # slight cadence for visible live stepper animation
+        streamed_idx = 0
 
-        interrupt_val = _extract_interrupt_payload(state)
+        # Recovery path: only for completed runs (e.g. server restart, re-fetch)
+        # Skip if the background task is still actively running to avoid killing the live stream
+        if not RUN_COMPLETE.get(thread_id) and thread_id not in RUNS_ACTIVE:
+            recovery_state = graph.get_state(config)
+            if recovery_state and recovery_state.values:
+                derive_events_from_state(thread_id, recovery_state.values)
+                RUN_COMPLETE[thread_id] = True
+
+        # Stream events live — poll every 0.4s, heartbeat every 10s to prevent connection drop
+        waited = 0.0
+        ticks_since_heartbeat = 0
+        while True:
+            current_events = EVENT_BUS.get(thread_id, [])
+            while streamed_idx < len(current_events):
+                yield f"data: {json.dumps(current_events[streamed_idx])}\n\n"
+                streamed_idx += 1
+                ticks_since_heartbeat = 0
+                await asyncio.sleep(0.18)
+
+            if RUN_COMPLETE.get(thread_id):
+                break
+
+            if waited >= 180.0:
+                logger.warning("SSE wait timeout for %s", thread_id)
+                break
+
+            await asyncio.sleep(0.4)
+            waited += 0.4
+            ticks_since_heartbeat += 1
+            if ticks_since_heartbeat >= 25:  # ~10 seconds with no events
+                yield ": heartbeat\n\n"
+                ticks_since_heartbeat = 0
+
+        # Final drain — pick up any events added by derive_events_from_state at graph completion
+        state = graph.get_state(config)
+        if state and state.values:
+            derive_events_from_state(thread_id, state.values)
+
+        current_events = EVENT_BUS.get(thread_id, [])
+        while streamed_idx < len(current_events):
+            yield f"data: {json.dumps(current_events[streamed_idx])}\n\n"
+            streamed_idx += 1
+            await asyncio.sleep(0.35)
+
+        # Terminal signals
+        interrupt_val = _extract_interrupt_payload(state) if state else None
         if interrupt_val:
-            await asyncio.sleep(0.05)
             yield f"data: {json.dumps({'event': 'awaiting_human_action', 'thread_id': thread_id, 'data': interrupt_val})}\n\n"
-        elif state.values.get("lifecycle_status") == "POSTING_PACKAGE_READY":
-            await asyncio.sleep(0.05)
+        elif state and (state.values or {}).get("lifecycle_status") == "POSTING_PACKAGE_READY":
             yield f"data: {json.dumps({'event': 'stream_completed', 'thread_id': thread_id})}\n\n"
 
     return StreamingResponse(

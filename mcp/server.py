@@ -124,7 +124,7 @@ _MOCK_INVOICE_DB: dict[str, dict[str, Any]] = {
         "invoice_date": "2026-09-16",
         "due_date": "2026-10-16",
         "po_number": "",  # Missing PO creates ambiguity
-        "bank_account_last4": "8765",
+        "bank_account_last4": "8899",
         "lines": [
             {"line_number": 1, "description": "Cloud hosting package", "quantity": 2, "unit_price": 1200.00, "total": 2400.00}
         ],
@@ -285,14 +285,22 @@ def extract_invoice(run_id: str, invoice_reference: str) -> dict[str, Any]:
         is_doc = False
 
     if is_doc:
-        from app.agent.extractor import extract_invoice_from_document
-        res = extract_invoice_from_document(invoice_reference, run_id=run_id)
-        return {
-            "status": "SUCCESS",
-            "invoice_reference": str(invoice_reference),
-            "extracted_data": res["extracted_data"],
-            "extraction_method": res.get("method", "multimodal_vision_gpt4o_mini"),
-        }
+        logger.info("[extract_invoice] Starting vision extraction: run=%s file=%s", run_id, invoice_reference)
+        try:
+            from app.agent.extractor import extract_invoice_from_document
+            res = extract_invoice_from_document(invoice_reference, run_id=run_id)
+            logger.info("[extract_invoice] Extraction SUCCESS: method=%s invoice=%s total=%s",
+                        res.get("method"), res.get("extracted_data", {}).get("invoice_number"), res.get("extracted_data", {}).get("total_amount"))
+            return {
+                "status": "SUCCESS",
+                "invoice_reference": str(invoice_reference),
+                "extracted_data": res["extracted_data"],
+                "extraction_method": res.get("method", "multimodal_vision_gpt4o"),
+            }
+        except Exception as exc:
+            logger.error("[extract_invoice] Vision extraction FAILED: run=%s file=%s error=%s: %s",
+                         run_id, invoice_reference, type(exc).__name__, exc, exc_info=True)
+            raise
 
     # Pre-canned mock database check
     data = _MOCK_INVOICE_DB.get(invoice_reference)

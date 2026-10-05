@@ -136,7 +136,7 @@ def render_batch_summary_card(
                         key=f"btn_inspect_batch_{tid}_{idx}",
                         type="primary" if is_active else "secondary",
                         disabled=is_active,
-                        use_container_width=True,
+                        width="stretch",
                     ):
                         selected_tid = tid
 
