@@ -81,6 +81,3 @@ def get_checkpointer(isolated: bool = False) -> BaseCheckpointSaver:
     return default_checkpointer_manager.get_checkpointer(isolated=isolated)
 
 
-def get_postgres_saver() -> BaseCheckpointSaver:
-    """Explicitly retrieve PostgresSaver."""
-    return default_checkpointer_manager.get_postgres_saver()

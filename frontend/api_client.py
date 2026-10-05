@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, AsyncGenerator, Generator, Optional
+from typing import Any, Generator, Optional
 import httpx
 
 logger = logging.getLogger("ap_frontend.client")

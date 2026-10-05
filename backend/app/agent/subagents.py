@@ -284,10 +284,15 @@ def execute_controls(
             extracted_invoice.get("due_date", ""),
             extracted_invoice.get("currency", "USD"),
         ),
-        "CHK_PO_IDENT": lambda: identify_purchase_order(invoice_reference, resolved_po),
-        "CHK_PO_HEADER": lambda: validate_po_header(resolved_po or "PO-9001", extracted_invoice.get("supplier_id", "SUPP-001")),
-        "CHK_PO_LINES": lambda: match_po_lines(resolved_po or "PO-9001", extracted_invoice.get("lines")),
-        "CHK_PO_REMAIN": lambda: calculate_po_remaining(resolved_po or "PO-9001", extracted_invoice.get("total_amount", 0.0)),
+        "CHK_PO_IDENT": lambda: identify_purchase_order(
+            invoice_reference,
+            resolved_po,
+            supplier_id=extracted_invoice.get("supplier_id", ""),
+            invoice_amount=extracted_invoice.get("total_amount", 0.0),
+        ),
+        "CHK_PO_HEADER": lambda: validate_po_header(resolved_po, extracted_invoice.get("supplier_id", "")),
+        "CHK_PO_LINES": lambda: match_po_lines(resolved_po, extracted_invoice.get("lines")),
+        "CHK_PO_REMAIN": lambda: calculate_po_remaining(resolved_po, extracted_invoice.get("total_amount", 0.0)),
         "CHK_PO_TOL": lambda: evaluate_po_tolerances(extracted_invoice.get("lines")),
         "CHK_NO_PO_POL": lambda: evaluate_no_po_policy(extracted_invoice.get("total_amount", 0.0)),
         "CHK_APP_ROUTE": lambda: select_approval_route(extracted_invoice.get("total_amount", 0.0)),
@@ -371,6 +376,14 @@ def execute_controls(
         if cid == "CHK_SUPPLIER_RES" and res_dict.get("raw_output", {}).get("supplier_id"):
             if not extracted_invoice.get("supplier_id"):
                 extracted_invoice["supplier_id"] = res_dict["raw_output"]["supplier_id"]
+
+        # Update resolved_po when CHK_PO_IDENT auto-resolves (single open PO found)
+        # The downstream lambdas (CHK_PO_HEADER/LINES/REMAIN) close over resolved_po by reference,
+        # so rebinding it here makes them pick up the correct PO for subsequent calls.
+        if cid == "CHK_PO_IDENT" and cr.status == "PASSED":
+            auto_po = cr.raw_output.get("po_number") or res_dict.get("raw_output", {}).get("po_number")
+            if auto_po and not resolved_po:
+                resolved_po = str(auto_po)
             if not suppress_live_events:
                 _emit_live("supplier_resolved", {
                     "supplier_name": extracted_invoice.get("supplier_name"),

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
-from app.agent.state import APEmployeeState, WorkflowImprovementState
+from typing import Literal
+from app.agent.state import APEmployeeState
 
 
 def route_outcome_decision(state: APEmployeeState) -> Literal["human_gate", "finalize_run"]:
@@ -33,9 +33,3 @@ def route_human_action(state: APEmployeeState) -> Literal["finalize_run", "run_a
     # Operator provided exception resolution -> re-execute controls
     return "run_ap_employee"
 
-
-def route_improvement_decision(state: WorkflowImprovementState) -> Literal["activate_or_reject", "END"]:
-    """Route improvement proposals post administrator gate."""
-    if state.get("lifecycle_status") == "ADMIN_REVIEW":
-        return "activate_or_reject"
-    return "END"

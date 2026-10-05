@@ -117,6 +117,7 @@ def run_ap_employee_pipeline(
     human_action: dict[str, Any] | None = None,
     tracer: TraceObserver | None = None,
     force_skip_checks: list[str] | None = None,
+    frozen_extracted_invoice: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], APEmployeeOutcome]:
     """Execute the end-to-end AP Employee flow via the Deep Agent with specialist subagents.
 
@@ -135,4 +136,5 @@ def run_ap_employee_pipeline(
         human_action=human_action,
         tracer=tracer,
         force_skip_checks=force_skip_checks,
+        frozen_extracted_invoice=frozen_extracted_invoice,
     )

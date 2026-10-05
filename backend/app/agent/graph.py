@@ -8,14 +8,13 @@ Implements:
 from __future__ import annotations
 
 import time
-from typing import Any, Literal
+from typing import Any
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command, interrupt
+from langgraph.types import interrupt
 
-from app.agent.schemas import APEmployeeOutcome, ControlExecutionReport, DecisionResult
+from app.agent.schemas import ControlExecutionReport
 from app.agent.state import APEmployeeState, WorkflowImprovementState
 from app.agent.main_agent import run_ap_employee_pipeline, verify_and_sanitize_outcome
-from app.agent.subagents import analyze_workflow_improvement
 from app.agent.routing import (
     route_human_action,
     route_outcome_decision,
@@ -26,11 +25,10 @@ from app.agent.mcp_tools import (
     build_posting_package,
     get_feedback_events,
     run_regression_suite,
-    verify_regression_results,
 )
 from app.agent.observability import get_improvement_tracer, get_invoice_tracer
 from app.agent.persistence import get_checkpointer
-from app.agent.policy import get_active_policy, global_policy_manager
+from app.agent.policy import global_policy_manager
 from app.agent.flow_logger import flow_logger
 
 
@@ -77,6 +75,11 @@ def run_ap_employee(state: APEmployeeState) -> dict[str, Any]:
     # Check for test-forced missing checks if any
     force_skip = state.get("safe_error", {}).get("force_skip_checks") if state.get("safe_error") else None
 
+    # On resume, pass the already-extracted invoice so pre-extraction is skipped.
+    # Re-extraction is non-deterministic (GPT-4o vision) and can return different
+    # field values, corrupting checks like CHK_ARITHMETIC on the second pass.
+    frozen_extracted = state.get("extracted_invoice") or None
+
     extracted_invoice, outcome = run_ap_employee_pipeline(
         run_id=run_id,
         invoice_reference=invoice_ref,
@@ -84,6 +87,7 @@ def run_ap_employee(state: APEmployeeState) -> dict[str, Any]:
         human_action=last_human_action,
         tracer=tracer,
         force_skip_checks=force_skip,
+        frozen_extracted_invoice=frozen_extracted,
     )
     flow_logger.node_end("InvoiceProcessingGraph", "run_ap_employee", outcome.status, next_step="verify_agent_output")
 

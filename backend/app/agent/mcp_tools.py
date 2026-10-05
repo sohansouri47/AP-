@@ -9,30 +9,12 @@ Provides:
 
 from __future__ import annotations
 
-import copy
-import hashlib
-from pathlib import Path
 import time
 from typing import Any, Callable, Literal
 from pydantic import BaseModel, Field
 
-from app.agent.schemas import (
-    CandidateComparison,
-    CheckResult,
-    ControlExecutionReport,
-    DecisionResult,
-    EvidenceSummary,
-    ImprovementProposal,
-    InvestigationResult,
-    RequiredCheck,
-    UnresolvedItem,
-)
-from app.agent.policy import (
-    get_active_policy,
-    global_policy_manager,
-    activate_policy,
-    rollback_policy,
-)
+from app.agent.schemas import RequiredCheck
+from app.agent.policy import get_active_policy, activate_policy, rollback_policy
 from app.agent.flow_logger import flow_logger
 from app.agent.mcp_client import get_mcp_client
 
@@ -213,147 +195,6 @@ def verify_tool_permission(role: str, tool_name: str) -> None:
         )
 
 
-# In-memory mock database / context store
-_MOCK_INVOICE_DB: dict[str, dict[str, Any]] = {
-    "inv-happy-001": {
-        "invoice_number": "INV-2026-001",
-        "supplier_name": "Acme Industrial Supplies LLC",
-        "supplier_tax_id": "US-XX-9876543",
-        "supplier_id": "SUPP-001",
-        "subtotal": 1000.00,
-        "tax_amount": 80.00,
-        "total_amount": 1080.00,
-        "currency": "USD",
-        "invoice_date": "2026-09-15",
-        "due_date": "2026-10-15",
-        "po_number": "PO-9001",
-        "bank_account_last4": "4321",
-        "lines": [
-            {"line_number": 1, "description": "Steel bolts grade 8", "quantity": 100, "unit_price": 5.00, "total": 500.00},
-            {"line_number": 2, "description": "Hydraulic seal kit", "quantity": 10, "unit_price": 50.00, "total": 500.00},
-        ],
-    },
-    "inv-ambiguous-po": {
-        "invoice_number": "INV-2026-002",
-        "supplier_name": "Globex Hardware Inc",
-        "supplier_tax_id": "US-YY-1122334",
-        "supplier_id": "SUPP-002",
-        "subtotal": 2400.00,
-        "tax_amount": 192.00,
-        "total_amount": 2592.00,
-        "currency": "USD",
-        "invoice_date": "2026-09-20",
-        "due_date": "2026-10-20",
-        "po_number": "",  # Unspecified or multiple candidates exist
-        "bank_account_last4": "8899",
-        "lines": [
-            {"line_number": 1, "description": "Enterprise cloud router", "quantity": 1, "unit_price": 2400.00, "total": 2400.00},
-        ],
-    },
-    "inv-tax-mismatch": {
-        "invoice_number": "INV-2026-003",
-        "supplier_name": "Acme Industrial Supplies LLC",
-        "supplier_tax_id": "US-XX-9876543",
-        "supplier_id": "SUPP-001",
-        "subtotal": 1000.00,
-        "tax_amount": 80.00,
-        "total_amount": 1200.00,  # 1000 + 80 != 1200
-        "currency": "USD",
-        "invoice_date": "2026-09-15",
-        "due_date": "2026-10-15",
-        "po_number": "PO-9001",
-        "bank_account_last4": "4321",
-        "lines": [
-            {"line_number": 1, "description": "Steel bolts grade 8", "quantity": 100, "unit_price": 5.00, "total": 500.00},
-        ],
-    },
-    "inv-duplicate-001": {
-        "invoice_number": "INV-DUP-999",
-        "supplier_name": "Vandelay Industries",
-        "supplier_tax_id": "US-ZZ-5566778",
-        "supplier_id": "SUPP-003",
-        "subtotal": 500.00,
-        "tax_amount": 40.00,
-        "total_amount": 540.00,
-        "currency": "USD",
-        "invoice_date": "2026-09-01",
-        "due_date": "2026-10-01",
-        "po_number": "PO-8888",
-        "bank_account_last4": "1111",
-        "is_duplicate": True,
-        "lines": [
-            {"line_number": 1, "description": "Latex sample parts", "quantity": 5, "unit_price": 100.00, "total": 500.00},
-        ],
-    },
-}
-
-_MOCK_PO_DB: dict[str, dict[str, Any]] = {
-    "PO-9001": {
-        "po_number": "PO-9001",
-        "supplier_id": "SUPP-001",
-        "supplier_name": "Acme Industrial Supplies LLC",
-        "status": "APPROVED",
-        "currency": "USD",
-        "total_amount": 5000.00,
-        "remaining_amount": 5000.00,
-        "lines": [
-            {"line_number": 1, "description": "Steel bolts grade 8", "quantity": 500, "unit_price": 5.00, "total": 2500.00},
-            {"line_number": 2, "description": "Hydraulic seal kit", "quantity": 50, "unit_price": 50.00, "total": 2500.00},
-        ],
-    },
-    "PO-2001": {
-        "po_number": "PO-2001",
-        "supplier_id": "SUPP-002",
-        "supplier_name": "Globex Hardware Inc",
-        "status": "APPROVED",
-        "currency": "USD",
-        "total_amount": 5000.00,
-        "remaining_amount": 5000.00,
-        "lines": [
-            {"line_number": 1, "description": "Enterprise cloud router", "quantity": 2, "unit_price": 2400.00, "total": 4800.00},
-            {"line_number": 2, "description": "Rack mount kit", "quantity": 2, "unit_price": 100.00, "total": 200.00},
-        ],
-    },
-    "PO-2002": {
-        "po_number": "PO-2002",
-        "supplier_id": "SUPP-002",
-        "supplier_name": "Globex Hardware Inc",
-        "status": "APPROVED",
-        "currency": "USD",
-        "total_amount": 10000.00,
-        "remaining_amount": 10000.00,
-        "lines": [
-            {"line_number": 1, "description": "Fiber switch 48-port", "quantity": 2, "unit_price": 5000.00, "total": 10000.00},
-        ],
-    },
-}
-
-_MOCK_FEEDBACK_DB: list[dict[str, Any]] = [
-    {
-        "feedback_id": "FB-001",
-        "invoice_number": "INV-101",
-        "reviewer_id": "alice_reviewer",
-        "field_corrected": "po_line_mapping",
-        "prior_value": 0,
-        "corrected_value": 1,
-        "comment": "Line SKU A100 always maps to PO Line 1",
-        "timestamp": 1726000000.0,
-    },
-    {
-        "feedback_id": "FB-002",
-        "invoice_number": "INV-102",
-        "reviewer_id": "bob_operator",
-        "field_corrected": "po_line_mapping",
-        "prior_value": 0,
-        "corrected_value": 1,
-        "comment": "Line SKU A100 mapped to PO Line 1 manually",
-        "timestamp": 1726003600.0,
-    },
-]
-
-_MOCK_AUDIT_LOGS: list[dict[str, Any]] = []
-
-
 # =====================================================================
 # 3. FastMCP Tool Delegators (Connecting Agents to FastMCP Server)
 # =====================================================================
@@ -455,25 +296,6 @@ def check_arithmetic(
 ) -> dict[str, Any]:
     """Verify invoice header totals and line-item arithmetic are internally consistent."""
     verify_tool_permission("control-executor", "check_arithmetic")
-    from app.agent.policy import get_active_policy
-    policy = get_active_policy()
-    if policy and policy.version != "v1.0.0":
-        calc = round(subtotal + tax_amount, 2)
-        diff = abs(calc - total_amount)
-        if diff > policy.arithmetic_tolerance:
-            return {
-                "check_id": "CHK_ARITHMETIC",
-                "status": "FAILED",
-                "error_code": "ARITHMETIC_MISMATCH",
-                "message": f"Subtotal ({subtotal}) + Tax ({tax_amount}) != Total ({total_amount})",
-                "raw_output": {"calculated_total": calc, "diff": diff},
-            }
-        return {
-            "check_id": "CHK_ARITHMETIC",
-            "status": "PASSED",
-            "message": "Header and line arithmetic verified exactly",
-            "raw_output": {"calculated_total": calc},
-        }
     return get_mcp_client().call_tool(
         "control-executor",
         "check_arithmetic",
@@ -493,23 +315,6 @@ def check_dates_currency(
 ) -> dict[str, Any]:
     """Validate invoice date format and verify currency is in the authorized list."""
     verify_tool_permission("control-executor", "check_dates_currency")
-    from app.agent.policy import get_active_policy
-    policy = get_active_policy()
-    if policy and policy.version != "v1.0.0":
-        if currency not in policy.allowed_currencies:
-            return {
-                "check_id": "CHK_DATES_CURR",
-                "status": "FAILED",
-                "error_code": "UNSUPPORTED_CURRENCY",
-                "message": f"Currency {currency} not authorized for automatic processing",
-                "raw_output": {"currency": currency},
-            }
-        return {
-            "check_id": "CHK_DATES_CURR",
-            "status": "PASSED",
-            "message": "Invoice date format valid and currency authorized",
-            "raw_output": {"currency": currency},
-        }
     return get_mcp_client().call_tool(
         "control-executor",
         "check_dates_currency",
@@ -517,13 +322,23 @@ def check_dates_currency(
     )
 
 
-def identify_purchase_order(invoice_reference: str, po_number: str = "") -> dict[str, Any]:
+def identify_purchase_order(
+    invoice_reference: str,
+    po_number: str = "",
+    supplier_id: str = "",
+    invoice_amount: float = 0.0,
+) -> dict[str, Any]:
     """Identify and associate the purchase order for this invoice."""
     verify_tool_permission("control-executor", "identify_purchase_order")
     return get_mcp_client().call_tool(
         "control-executor",
         "identify_purchase_order",
-        {"invoice_reference": invoice_reference, "po_number": po_number},
+        {
+            "invoice_reference": invoice_reference,
+            "po_number": po_number,
+            "supplier_id": supplier_id,
+            "invoice_amount": invoice_amount,
+        },
     )
 
 
@@ -583,17 +398,6 @@ def evaluate_no_po_policy(invoice_amount: float, cost_center: str = "") -> dict[
 def select_approval_route(invoice_amount: float, supplier_tier: str = "standard") -> dict[str, Any]:
     """Select the required approval role based on invoice amount and supplier tier."""
     verify_tool_permission("control-executor", "select_approval_route")
-    from app.agent.policy import get_active_policy
-    policy = get_active_policy()
-    if policy and policy.version != "v1.0.0":
-        threshold = policy.finance_director_threshold
-        role = "Finance Director" if invoice_amount > threshold else "Finance Approver"
-        return {
-            "check_id": "CHK_APP_ROUTE",
-            "status": "PASSED",
-            "message": f"Approval route assigned to role: {role}",
-            "raw_output": {"required_role": role, "threshold": threshold},
-        }
     return get_mcp_client().call_tool(
         "control-executor",
         "select_approval_route",

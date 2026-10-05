@@ -247,6 +247,7 @@ def run_ap_employee_deep_agent(
     human_action: dict[str, Any] | None = None,
     tracer: TraceObserver | None = None,
     force_skip_checks: list[str] | None = None,
+    frozen_extracted_invoice: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], APEmployeeOutcome]:
     """Invoke the AP Employee Deep Agent and parse its output.
 
@@ -266,11 +267,38 @@ def run_ap_employee_deep_agent(
         f"Invoice: {invoice_reference} | Policy: {policy_version}",
     )
 
+    # Pre-extract invoice data so it's always available for the deterministic fallback.
+    # On resume (frozen_extracted_invoice provided), skip re-extraction: GPT-4o vision
+    # is non-deterministic and can return different field values on a second pass,
+    # which would corrupt checks like CHK_ARITHMETIC that compare subtotal+tax vs total.
+    pre_extracted: dict[str, Any] = {}
+    if frozen_extracted_invoice:
+        pre_extracted = frozen_extracted_invoice
+        logger.info("Using frozen extracted invoice (resume run): invoice=%s supplier=%s total=%s po=%s",
+                    pre_extracted.get("invoice_number"),
+                    pre_extracted.get("supplier_name"),
+                    pre_extracted.get("total_amount"),
+                    pre_extracted.get("po_number"))
+    else:
+        try:
+            from app.agent.extractor import extract_invoice_from_document
+            _res = extract_invoice_from_document(invoice_reference, run_id=run_id, tracer=tracer)
+            pre_extracted = _res.get("extracted_data", {})
+            logger.info("Pre-extraction done: invoice=%s supplier=%s total=%s po=%s",
+                        pre_extracted.get("invoice_number"),
+                        pre_extracted.get("supplier_name"),
+                        pre_extracted.get("total_amount"),
+                        pre_extracted.get("po_number"))
+        except Exception as exc:
+            logger.warning("Pre-extraction failed (will rely on deep agent): %s", exc)
+
     parts = [
         f"Process invoice reference: {invoice_reference}",
         f"Run ID: {run_id}",
         f"Policy Version: {policy_version}",
     ]
+    if pre_extracted:
+        parts.append(f"Extracted invoice data: {json.dumps(pre_extracted)}")
     if human_action:
         parts.append(f"Human resolution already applied: {json.dumps(human_action)}")
         selected_po = human_action.get("selected_po")
@@ -294,7 +322,8 @@ def run_ap_employee_deep_agent(
 
     tool_call_map = _build_tool_call_map(messages)
 
-    extracted_invoice: dict[str, Any] = {}
+    # Seed from pre-extraction; overridden below if deep agent returns a richer result
+    extracted_invoice: dict[str, Any] = dict(pre_extracted)
     control_report_data: dict | None = None
     investigation_data: dict | None = None
 

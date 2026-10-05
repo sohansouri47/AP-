@@ -6,10 +6,8 @@
 5. Langfuse trace event verification
 """
 
-import json
 from pathlib import Path
 from langgraph.types import Command
-from langgraph.checkpoint.memory import MemorySaver
 
 from app.agent.graph import create_invoice_graph, create_improvement_graph
 from app.agent.observability import RECORDED_TRACES, flush_all_tracers

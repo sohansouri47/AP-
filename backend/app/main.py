@@ -18,7 +18,6 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 import time
 import uuid
 from pathlib import Path
@@ -38,7 +37,6 @@ from app.db.repository import (
     record_human_action_db,
 )
 from app.agent.graph import create_invoice_graph
-from app.agent.persistence import get_checkpointer, get_postgres_saver
 from app.agent.mcp_client import get_mcp_client
 from app.events import EVENT_BUS, RUN_COMPLETE, RUNS_ACTIVE, emit_event, current_run_id
 
@@ -47,7 +45,6 @@ logger = logging.getLogger("ap_api")
 
 # Register Langfuse LangChain callback so deep-agent LLM calls appear in traces
 try:
-    import os
     from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
     _lf_handler = LangfuseCallbackHandler(
         public_key=os.getenv("LANGFUSE_PUBLIC_KEY", ""),
@@ -508,8 +505,15 @@ async def resume_invoice_run(thread_id: str, payload: HumanResumeRequest):
 def get_invoice_status(thread_id: str):
     """Retrieve real-time execution snapshot for a given thread_id directly from PostgresSaver."""
     config = {"configurable": {"thread_id": thread_id}}
-    graph = create_invoice_graph()
-    state = graph.get_state(config)
+    try:
+        graph = create_invoice_graph()
+        state = graph.get_state(config)
+    except Exception as exc:
+        logger.error("get_state failed for %s: %s", thread_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load run state for '{thread_id}': {type(exc).__name__}: {exc}",
+        )
 
     if not state.values:
         raise HTTPException(
@@ -517,8 +521,13 @@ def get_invoice_status(thread_id: str):
             detail=f"Run '{thread_id}' not found.",
         )
 
-    interrupt_payload = _extract_interrupt_payload(state)
-    lifecycle_status = state.values.get("lifecycle_status", "UNKNOWN")
+    try:
+        interrupt_payload = _extract_interrupt_payload(state)
+        lifecycle_status = state.values.get("lifecycle_status", "UNKNOWN")
+    except Exception as exc:
+        logger.error("State deserialization failed for %s: %s", thread_id, exc)
+        lifecycle_status = "FAILED"
+        interrupt_payload = None
 
     return InvoiceExecutionResponse(
         thread_id=thread_id,

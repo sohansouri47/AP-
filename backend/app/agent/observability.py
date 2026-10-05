@@ -16,7 +16,7 @@ import time
 import hashlib
 import logging
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 from app.agent.flow_logger import flow_logger, BOLD, CYAN, RESET
@@ -477,13 +477,6 @@ def flush_all_tracers() -> None:
     """Flush all active trace observers to Langfuse Cloud."""
     for tracer in list(_ACTIVE_TRACERS.values()):
         tracer.flush()
-
-
-def reset_tracers() -> None:
-    """Flush and clear all in-memory tracers (for test isolation)."""
-    flush_all_tracers()
-    RECORDED_TRACES.clear()
-    _ACTIVE_TRACERS.clear()
 
 
 import atexit

@@ -25,8 +25,6 @@ Authority Boundaries:
 - NEVER approve invoices or activate workflow versions.
 """
 
-# Alias for backward compatibility
-MAIN_AP_EMPLOYEE_PROMPT = MAIN_AP_EMPLOYEE_SYSTEM_PROMPT
 
 
 # =====================================================================

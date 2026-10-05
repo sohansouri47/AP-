@@ -74,7 +74,7 @@ def initialize_database(drop_existing: bool = False) -> None:
                 VALUES
                     ('PO-9001', 'SUPP-001', 'Acme Operations Corp', 'APPROVED', 'USD', 5000.00, 0.00, 5000.00, '2026-08-01'),
                     ('PO-2001', 'SUPP-002', 'Acme Operations Corp', 'APPROVED', 'USD', 3000.00, 0.00, 3000.00, '2026-08-15'),
-                    ('PO-2002', 'SUPP-002', 'Acme Operations Corp', 'APPROVED', 'USD', 10000.00, 0.00, 10000.00, '2026-09-01'),
+                    ('PO-2002', 'SUPP-002', 'Acme Operations Corp', 'APPROVED', 'USD', 20000.00, 0.00, 20000.00, '2026-09-01'),
                     ('PO-8888', 'SUPP-003', 'Acme Operations Corp', 'APPROVED', 'USD', 2500.00, 500.00, 2000.00, '2026-07-20')
                 ON CONFLICT (po_number) DO UPDATE SET
                     remaining_amount = EXCLUDED.remaining_amount,
@@ -91,7 +91,7 @@ def initialize_database(drop_existing: bool = False) -> None:
                     ('PO-9001', 1, 'SKU-IND-100', 'Standard service unit', 5.0, 1000.00, 5000.00, 0.0, 5.0),
                     ('PO-2001', 1, 'SKU-CLD-201', 'Cloud hosting package', 2.0, 1200.00, 2400.00, 0.0, 2.0),
                     ('PO-2001', 2, 'SKU-SUP-202', 'Support add-on', 1.0, 600.00, 600.00, 0.0, 1.0),
-                    ('PO-2002', 1, 'SKU-ENT-301', 'Enterprise consulting retainer', 1.0, 10000.00, 10000.00, 0.0, 1.0),
+                    ('PO-2002', 1, 'SKU-ENT-301', 'Enterprise consulting retainer', 2.0, 10000.00, 20000.00, 0.0, 2.0),
                     ('PO-8888', 1, 'SKU-LTX-001', 'Latex sample parts', 5.0, 100.00, 500.00, 5.0, 0.0);
             """)
 

@@ -17,7 +17,6 @@ from dotenv import load_dotenv
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import BaseMessage
-from langchain_core.outputs import ChatResult
 
 logger = logging.getLogger(__name__)
 

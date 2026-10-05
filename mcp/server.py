@@ -39,18 +39,6 @@ from app.agent.policy import (
     activate_policy,
     rollback_policy,
 )
-from app.agent.schemas import (
-    CandidateComparison,
-    CheckResult,
-    ControlExecutionReport,
-    DecisionResult,
-    EvidenceSummary,
-    ImprovementProposal,
-    InvestigationResult,
-    RequiredCheck,
-    UnresolvedItem,
-)
-
 try:
     from app.db import (
         is_db_reachable,
@@ -63,7 +51,6 @@ try:
         check_file_duplicate_db,
         record_posted_invoice_db,
         record_audit_log_db,
-        get_audit_trail_db,
         get_feedback_events_db,
     )
     _DB_ENABLED = is_db_reachable()
@@ -198,10 +185,10 @@ _MOCK_PO_DB: dict[str, dict[str, Any]] = {
         "supplier_name": "Globex Corp",
         "status": "APPROVED",
         "currency": "USD",
-        "total_amount": 10000.00,
-        "remaining_amount": 10000.00,
+        "total_amount": 20000.00,
+        "remaining_amount": 20000.00,
         "lines": [
-            {"line_number": 1, "description": "Enterprise consulting retainer", "quantity": 1, "unit_price": 10000.00, "total": 10000.00}
+            {"line_number": 1, "description": "Enterprise consulting retainer", "quantity": 2, "unit_price": 10000.00, "total": 20000.00}
         ],
     },
 }
@@ -578,29 +565,66 @@ def check_dates_currency(
 
 
 @mcp.tool()
-def identify_purchase_order(invoice_reference: str, po_number: str = "") -> dict[str, Any]:
+def identify_purchase_order(
+    invoice_reference: str,
+    po_number: str = "",
+    supplier_id: str = "",
+    invoice_amount: float = 0.0,
+) -> dict[str, Any]:
     """Control CHK_PO_IDENT: Identify and resolve purchase order reference.
 
     Args:
         invoice_reference: Invoice reference or filename.
-        po_number: Extracted PO number if found.
+        po_number: Extracted PO number if found on the invoice.
+        supplier_id: Resolved supplier ID (used to look up candidates when po_number is absent).
+        invoice_amount: Invoice total (used to rank candidates).
     """
-    if not po_number:
+    if po_number:
+        return {
+            "check_id": "CHK_PO_IDENT",
+            "status": "PASSED",
+            "message": f"Purchase order {po_number} identified",
+            "raw_output": {"po_number": po_number},
+        }
+
+    # No PO on invoice — look up open POs for this supplier
+    candidates = get_po_candidates(supplier_id, invoice_amount) if supplier_id else []
+    candidate_ids = [c["po_number"] for c in candidates]
+
+    if len(candidates) == 1:
+        # Exactly one open PO → auto-resolve
+        resolved = candidate_ids[0]
+        return {
+            "check_id": "CHK_PO_IDENT",
+            "status": "PASSED",
+            "message": f"Single open PO {resolved} auto-resolved for supplier {supplier_id}",
+            "raw_output": {"po_number": resolved, "auto_resolved": True},
+        }
+
+    if len(candidates) > 1:
+        descriptions = {c["po_number"]: c.get("description", "") for c in candidates}
+        question = f"Invoice has no PO reference. Multiple open POs found for supplier {supplier_id}: " + \
+                   ", ".join(f"{pid} ({descriptions.get(pid, '')})" for pid in candidate_ids) + \
+                   ". Which PO should be applied?"
         return {
             "check_id": "CHK_PO_IDENT",
             "status": "REQUIRES_INPUT",
             "error_code": "AMBIGUOUS_PO_REFERENCE",
-            "message": "Purchase order not clearly specified on invoice; multiple candidates match",
+            "message": f"Multiple open POs found for supplier {supplier_id}; operator must select",
             "raw_output": {
-                "candidates": ["PO-2001", "PO-2002"],
+                "candidates": candidate_ids,
                 "unresolved": True,
+                "question": question,
             },
         }
+
+    # No PO number and no open POs found
     return {
         "check_id": "CHK_PO_IDENT",
-        "status": "PASSED",
-        "message": f"Purchase order {po_number} identified",
-        "raw_output": {"po_number": po_number},
+        "status": "FAILED",
+        "error_code": "NO_MATCHING_PO",
+        "message": f"No open purchase orders found for supplier {supplier_id or invoice_reference}",
+        "raw_output": {"candidates": [], "unresolved": True},
     }
 
 

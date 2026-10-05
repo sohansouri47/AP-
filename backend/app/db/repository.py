@@ -17,12 +17,6 @@ logger = logging.getLogger("ap_db.repository")
 # 1. Supplier / Vendor Master Repository
 # ---------------------------------------------------------------------
 
-def get_supplier_by_id(supplier_id: str) -> Optional[dict[str, Any]]:
-    """Retrieve supplier record by ID."""
-    with get_db_cursor() as cur:
-        cur.execute("SELECT * FROM suppliers WHERE supplier_id = %s;", (supplier_id,))
-        return cur.fetchone()
-
 
 def resolve_supplier_db(supplier_name: str, tax_id: str = "") -> Optional[dict[str, Any]]:
     """Resolve supplier by Tax ID (exact) or Name (fuzzy / exact)."""
@@ -371,43 +365,6 @@ def update_processing_run_db(
                 "UPDATE processing_runs SET lifecycle_status = %s WHERE run_id = %s;",
                 (lifecycle_status, run_id),
             )
-
-
-def record_check_execution_db(
-    run_id: str,
-    check_id: str,
-    execution_order: int,
-    status: str,
-    message: str,
-    error_code: str | None,
-    policy_version: str,
-    latency_ms: float,
-    evidence_ids: list[str] | None,
-    raw_output: dict[str, Any],
-) -> None:
-    """Persist individual MCP control execution metrics."""
-    with get_db_cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO check_executions (
-                run_id, check_id, execution_order, status, message,
-                error_code, policy_version, latency_ms, evidence_ids, raw_output
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-            """,
-            (
-                run_id,
-                check_id,
-                execution_order,
-                status,
-                message,
-                error_code,
-                policy_version,
-                latency_ms,
-                json.dumps(evidence_ids or []),
-                json.dumps(raw_output),
-            ),
-        )
 
 
 # ---------------------------------------------------------------------
