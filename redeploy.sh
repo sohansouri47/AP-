@@ -19,7 +19,7 @@ EC2_USER="ubuntu"
 EC2_KEY="$HOME/Downloads/ap.pem"
 APP_DIR="~/zamp-ap"
 GITHUB_REPO="https://github.com/sohansouri47/AP-.git"
-GITHUB_BRANCH="main"
+GITHUB_BRANCH="feat/multi-format-input-governance"
 # ────────────────────────────────────────────────────────────────
 
 REBUILD=false
